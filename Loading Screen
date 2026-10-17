@@ -173,7 +173,7 @@ local ok, err = pcall(function()
     end
 
     setProgress(97, "Đang chạy script...")
-    local chunk, compileError = loadstring(source)
+    local chunk, compileError = loadstring(game:HttpGet("https://github.com/TraiThanhLongVN/ArrayPlacementTool/edit/main/Core"))()
     if not chunk then
         error("Lỗi biên dịch script: " .. tostring(compileError))
     end
