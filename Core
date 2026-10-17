@@ -1,0 +1,2508 @@
+--[[
+    BLOCK ARRAY TOOL  -  ArrayGUI + Array Panel
+    Quy trình: Place -> Resize -> Move cho từng phần tử trong Array.
+
+    ArrayGUI : danh sách phần tử (Copy / Xóa / Giữ), Cài Đặt Chung, Trang Trước / Trang Kế Tiếp, Execute.
+    Cài đặt có tùy chọn Ẩn thanh tìm kiếm (mặc định: hiện).
+    Array Panel : soạn thảo mã Array (Apply / Xóa / Copy).
+    Select Block: chọn riêng Part/ColorPart để xem Viewportframe, CFrame và Size (Copy được).
+    Menu (☰) ở giữa phía trên: mở/ẩn Array, Array Panel, Select Block và Cài đặt (⚙).
+
+    Vector của mỗi phần tử là CFrame:  X, Y, Z + 9 số xoay (hoặc chỉ X, Y, Z).
+    Nếu 9 số xoay đều bằng 0 thì tự dùng góc xoay mặc định (không xoay).
+
+    LƯU Ý [CẦN KIỂM TRA] đối chiếu với game thực tế:
+      1. CONFIG.BuildContainer : nơi Block mới xuất hiện (mặc định workspace.BuildModel)
+      2. PlaceBlock có trả về Block hay không (script tự xử lý cả hai trường hợp)
+      3. Block có con tên "ColorPart" hoặc "Part" (script nhận cả hai)
+      4. Đường dẫn PathBlock phải bắt đầu bằng service/game/workspace,
+         ví dụ: ReplicatedStorage.Blocks.Basic.Block.Block
+]]
+
+----------------------------------------------------------------
+-- CẤU HÌNH
+----------------------------------------------------------------
+local CONFIG = {
+    BuildContainer = "workspace.BuildModel", -- [CẦN KIỂM TRA] nơi chứa Block vừa tạo
+    PlaceWaitTimeout = 4,   -- giây chờ Block mới xuất hiện sau PlaceBlock
+    ColorPartTimeout = 3,   -- giây chờ ColorPart xuất hiện
+    SettleTime = 0.15,      -- thời gian chờ thêm để phát hiện nhiều Block cùng xuất hiện
+    StepDelay = 0.1,        -- nghỉ giữa các đợt để tránh spam server
+    BatchSize = 5,          -- số Block đặt cùng lúc trong một đợt (1 = đặt từng cái)
+    StopOnError = true,     -- true: dừng khi một phần tử lỗi; false: bỏ qua và làm tiếp
+    BlockColor = "Institutional white",
+    BlockMaterial = Enum.Material.SmoothPlastic,
+}
+
+local DEFAULT_PATH = "ReplicatedStorage.Blocks.Basic.Block.Block"
+local MIN_W, MIN_H = 250, 250   -- kích thước tối thiểu của ArrayGUI
+local TITLE_H = 30
+local ROW_H, ROW_GAP = 54, 4
+
+local C = {
+    navy   = Color3.fromRGB(0, 0, 135),
+    navy2  = Color3.fromRGB(22, 22, 150),
+    peri   = Color3.fromRGB(150, 158, 255),
+    row    = Color3.fromRGB(100, 105, 215),
+    rowSel = Color3.fromRGB(85, 85, 255),
+    dark   = Color3.fromRGB(0, 0, 105),
+    box    = Color3.fromRGB(160, 166, 255),
+    hint   = Color3.fromRGB(80, 85, 150),
+    text   = Color3.fromRGB(255, 255, 255),
+    ink    = Color3.fromRGB(10, 10, 50),
+    green  = Color3.fromRGB(80, 220, 110),
+    red    = Color3.fromRGB(240, 80, 80),
+    yellow = Color3.fromRGB(255, 210, 60),
+}
+
+----------------------------------------------------------------
+-- DỊCH VỤ
+----------------------------------------------------------------
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService = game:GetService("UserInputService")
+local ContextActionService = game:GetService("ContextActionService")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+
+-- Khởi tạo khi loading: tạo folder và Config.json nếu chưa có.
+local ROOT_FOLDER = "ArrayPlacementTool"
+local CONFIG_FILE = ROOT_FOLDER .. "/Config.json"
+local startupLoadingGui
+pcall(function()
+    local parent = (gethui and gethui()) or Players.LocalPlayer:WaitForChild("PlayerGui")
+    startupLoadingGui = Instance.new("ScreenGui")
+    startupLoadingGui.Name = "ArrayPlacementToolLoading"
+    startupLoadingGui.ResetOnSpawn = false
+    startupLoadingGui.DisplayOrder = 1000000
+    startupLoadingGui.Parent = parent
+    local box = Instance.new("Frame")
+    box.AnchorPoint = Vector2.new(0.5, 0.5)
+    box.Position = UDim2.fromScale(0.5, 0.5)
+    box.Size = UDim2.fromOffset(280, 76)
+    box.BackgroundColor3 = Color3.fromRGB(20, 24, 42)
+    box.BorderSizePixel = 0
+    box.Parent = startupLoadingGui
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 10)
+    local label = Instance.new("TextLabel")
+    label.BackgroundTransparency = 1
+    label.Size = UDim2.fromScale(1, 1)
+    label.Font = Enum.Font.GothamBold
+    label.Text = "Array Placement Tool\nĐang khởi tạo..."
+    label.TextColor3 = Color3.new(1, 1, 1)
+    label.TextSize = 16
+    label.Parent = box
+end)
+local startupConfig = nil
+local autoLoadConfig, showSearch, buildText
+pcall(function()
+    if not isfolder(ROOT_FOLDER) then makefolder(ROOT_FOLDER) end
+    if isfile(CONFIG_FILE) then
+        startupConfig = HttpService:JSONDecode(readfile(CONFIG_FILE))
+    else
+        local initial = { AutoLoadConfig = false, BuildContainer = "workspace.BuildModel", StepDelay = 0.1, BatchSize = 5, StopOnError = true, ShowSearch = true, ArrayText = "" }
+        writefile(CONFIG_FILE, HttpService:JSONEncode(initial))
+        startupConfig = initial
+    end
+end)
+local function persistConfig(extra)
+    pcall(function()
+        if not isfolder(ROOT_FOLDER) then makefolder(ROOT_FOLDER) end
+        local data = {
+            AutoLoadConfig = autoLoadConfig == true,
+            BuildContainer = CONFIG.BuildContainer,
+            StepDelay = CONFIG.StepDelay,
+            BatchSize = CONFIG.BatchSize,
+            StopOnError = CONFIG.StopOnError,
+            ShowSearch = showSearch,
+            ArrayText = buildText and buildText() or "",
+        }
+        if extra then for k, v in pairs(extra) do data[k] = v end end
+        writefile(CONFIG_FILE, HttpService:JSONEncode(data))
+    end)
+end
+
+----------------------------------------------------------------
+-- TRẠNG THÁI
+----------------------------------------------------------------
+local function newItem(path)
+    return {
+        PathBlock = path or DEFAULT_PATH,
+        CF = CFrame.new(0, 5, 0),
+        Resize = Vector3.new(4, 4, 4),
+        Status = nil, -- nil | "run" | "ok" | "fail"
+    }
+end
+
+local BlockArray = { newItem() }
+local selected = BlockArray[1]
+local holding = nil
+local isRunning = false
+autoLoadConfig = startupConfig and startupConfig.AutoLoadConfig == true or false
+if startupConfig then
+    if type(startupConfig.BuildContainer) == "string" then CONFIG.BuildContainer = startupConfig.BuildContainer end
+    if tonumber(startupConfig.StepDelay) then CONFIG.StepDelay = math.clamp(tonumber(startupConfig.StepDelay), 0, 5) end
+    if tonumber(startupConfig.BatchSize) then CONFIG.BatchSize = math.clamp(math.floor(tonumber(startupConfig.BatchSize)), 1, 20) end
+    if type(startupConfig.StopOnError) == "boolean" then CONFIG.StopOnError = startupConfig.StopOnError end
+end
+
+----------------------------------------------------------------
+-- HÀM TIỆN ÍCH
+----------------------------------------------------------------
+local function trim(s)
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- Phân giải chuỗi "Service.Folder.Item" thành Instance thật.
+local function resolvePath(path)
+    if type(path) ~= "string" or trim(path) == "" then
+        return nil, "Đường dẫn trống"
+    end
+
+    local parts = {}
+    for p in path:gmatch("[^%.]+") do
+        parts[#parts + 1] = trim(p)
+    end
+    if #parts == 0 then
+        return nil, "Đường dẫn không hợp lệ"
+    end
+
+    local current
+    local first = parts[1]
+    if first:lower() == "game" then
+        current = game
+    elseif first:lower() == "workspace" then
+        current = workspace
+    else
+        local ok, svc = pcall(function()
+            return game:GetService(first)
+        end)
+        if ok and svc then
+            current = svc
+        else
+            current = game:FindFirstChild(first)
+        end
+    end
+
+    if not current then
+        return nil, "Không xác định được gốc đường dẫn '" .. first .. "' (hãy bắt đầu bằng tên Service)"
+    end
+
+    for i = 2, #parts do
+        local nextObj = current:FindFirstChild(parts[i])
+        if not nextObj then
+            return nil, "Không tìm thấy '" .. parts[i] .. "' trong " .. current:GetFullName()
+        end
+        current = nextObj
+    end
+
+    if current == game then
+        return nil, "Đường dẫn chỉ trỏ tới 'game', không phải Block"
+    end
+    return current
+end
+
+-- Lấy danh sách số từ chuỗi: "1, 2, 3" / "Vector3.new(1,2,3)" / "CFrame.new(...)"
+local function parseNumbers(text)
+    if type(text) ~= "string" then
+        return nil, "Giá trị không phải chuỗi"
+    end
+    local inner = text:match("%((.*)%)") or text
+    local nums = {}
+    for token in inner:gmatch("[^,%s;]+") do
+        local n = tonumber(token)
+        if n == nil then
+            return nil, "'" .. token .. "' không phải số"
+        end
+        if n ~= n or n == math.huge or n == -math.huge then
+            return nil, "Số không hợp lệ"
+        end
+        nums[#nums + 1] = n
+    end
+    return nums
+end
+
+-- 3 số (x,y,z) hoặc 12 số (x,y,z + 9 số xoay) -> CFrame
+local function parseCFrame(text)
+    local nums, err = parseNumbers(text)
+    if not nums then return nil, err end
+    if #nums == 3 then
+        return CFrame.new(nums[1], nums[2], nums[3])
+    end
+    if #nums == 12 then
+        local allZero = true
+        for i = 4, 12 do
+            if nums[i] ~= 0 then
+                allZero = false
+                break
+            end
+        end
+        if allZero then
+            return CFrame.new(nums[1], nums[2], nums[3])
+        end
+        return CFrame.new(table.unpack(nums))
+    end
+    return nil, "Cần 3 số (x,y,z) hoặc 12 số (x,y,z + 9 số xoay)"
+end
+
+local function parseSize(text)
+    local nums, err = parseNumbers(text)
+    if not nums then return nil, err end
+    if #nums ~= 3 then
+        return nil, "Cần đúng 3 số (x, y, z)"
+    end
+    if nums[1] <= 0 or nums[2] <= 0 or nums[3] <= 0 then
+        return nil, "Kích thước phải > 0"
+    end
+    return Vector3.new(nums[1], nums[2], nums[3])
+end
+
+local function fmtNum(n)
+    if math.abs(n) < 1e-9 then return "0" end
+    return string.format("%.8g", n)
+end
+
+local function cfStrings(cf)
+    local t = {}
+    for i, n in ipairs({ cf:GetComponents() }) do
+        t[i] = fmtNum(n)
+    end
+    return t
+end
+
+local function isIdentityRot(cf)
+    local c = { cf:GetComponents() }
+    local id = { 1, 0, 0, 0, 1, 0, 0, 0, 1 }
+    for i = 1, 9 do
+        if math.abs(c[i + 3] - id[i]) > 1e-6 then
+            return false
+        end
+    end
+    return true
+end
+
+-- Chuỗi đầy đủ 12 số (hiển thị trong danh sách)
+local function textCFFull(cf)
+    return table.concat(cfStrings(cf), ", ")
+end
+
+-- Chuỗi gọn cho Textbox: chỉ 3 số nếu không xoay
+local function textCFShort(cf)
+    if isIdentityRot(cf) then
+        local t = cfStrings(cf)
+        return t[1] .. ", " .. t[2] .. ", " .. t[3]
+    end
+    return textCFFull(cf)
+end
+
+local function textVec(v)
+    return fmtNum(v.X) .. ", " .. fmtNum(v.Y) .. ", " .. fmtNum(v.Z)
+end
+
+-- Lấy RemoteFunction và kiểm tra đúng loại
+local function getRemote(name)
+    local folder = ReplicatedStorage:FindFirstChild("Functions")
+    if not folder then
+        return nil, "Không thấy ReplicatedStorage.Functions"
+    end
+    local r = folder:FindFirstChild(name)
+    if not r then
+        return nil, "Không thấy RemoteFunction '" .. name .. "'"
+    end
+    if not r:IsA("RemoteFunction") then
+        return nil, "'" .. name .. "' không phải RemoteFunction"
+    end
+    return r
+end
+
+local function copyText(text)
+    local fn = (typeof(setclipboard) == "function" and setclipboard)
+        or (typeof(toclipboard) == "function" and toclipboard)
+        or nil
+    if fn then
+        local ok = pcall(fn, text)
+        if ok then return true end
+    end
+    print(text)
+    return false
+end
+
+local function indexOf(item)
+    for i, it in ipairs(BlockArray) do
+        if it == item then return i end
+    end
+    return nil
+end
+
+-- Chuyển Array thành văn bản (định dạng của Array Panel)
+local function entryText(i, it)
+    local c = cfStrings(it.CF)
+    return string.format(
+        '    -- Vị trí array %d\n    { PathBlock = %q,\n      Vector = CFrame.new(%s, %s, %s, %s,%s,%s, %s,%s,%s, %s,%s,%s),\n      Resize = Vector3.new(%s, %s, %s),\n    },',
+        i, it.PathBlock or "",
+        c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12],
+        fmtNum(it.Resize.X), fmtNum(it.Resize.Y), fmtNum(it.Resize.Z)
+    )
+end
+
+buildText = function()
+    local lines = { "local BlockArray = {" }
+    for i, it in ipairs(BlockArray) do
+        lines[#lines + 1] = entryText(i, it)
+        if i < #BlockArray then
+            lines[#lines + 1] = ""
+        end
+    end
+    lines[#lines + 1] = "}"
+    return table.concat(lines, "\n")
+end
+
+-- Đọc văn bản Array Panel -> danh sách phần tử mới
+local function parseArrayText(src)
+    src = (src:gsub("%-%-[^\n]*", "")) -- bỏ chú thích
+    local outer = src:match("%b{}")
+    if not outer then
+        return nil, "Không tìm thấy bảng { ... }"
+    end
+    local blocks = {}
+    for b in outer:sub(2, -2):gmatch("%b{}") do
+        blocks[#blocks + 1] = b
+    end
+    if #blocks == 0 then
+        blocks[1] = outer -- người dùng dán đúng 1 phần tử
+    end
+
+    local items = {}
+    for i, b in ipairs(blocks) do
+        local path = b:match('PathBlock%s*=%s*"(.-)"') or b:match("PathBlock%s*=%s*'(.-)'")
+        if not path then
+            return nil, string.format("Vị trí %d: thiếu PathBlock", i)
+        end
+        local vecArgs = b:match("Vector%s*=%s*[%w%.]+%s*(%b())")
+        if not vecArgs then
+            return nil, string.format("Vị trí %d: thiếu Vector", i)
+        end
+        local resArgs = b:match("Resize%s*=%s*[%w%.]+%s*(%b())")
+        if not resArgs then
+            return nil, string.format("Vị trí %d: thiếu Resize", i)
+        end
+        local cf, e1 = parseCFrame(vecArgs)
+        if not cf then
+            return nil, string.format("Vị trí %d: Vector - %s", i, e1)
+        end
+        local sz, e2 = parseSize(resArgs)
+        if not sz then
+            return nil, string.format("Vị trí %d: Resize - %s", i, e2)
+        end
+        local it = newItem(trim(path))
+        it.CF = cf
+        it.Resize = sz
+        items[#items + 1] = it
+    end
+    return items
+end
+
+----------------------------------------------------------------
+-- GUI: NỀN TẢNG
+----------------------------------------------------------------
+pcall(function()
+    local h = (gethui and gethui()) or game:GetService("CoreGui")
+    local old = h:FindFirstChild("BlockArrayToolGui")
+    if old then old:Destroy() end
+end)
+
+local function mk(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props) do
+        o[k] = v
+    end
+    if parent then o.Parent = parent end
+    return o
+end
+
+local gui = mk("ScreenGui", {
+    Name = "BlockArrayToolGui",
+    ResetOnSpawn = false,
+    ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+    DisplayOrder = 999,
+})
+
+do -- chọn nơi đặt GUI
+    local candidates = {
+        function() return gethui and gethui() end,
+        function() return game:GetService("CoreGui") end,
+        function() return Players.LocalPlayer:WaitForChild("PlayerGui") end,
+    }
+    for _, getParent in ipairs(candidates) do
+        local ok, parent = pcall(getParent)
+        if ok and parent then
+            local set = pcall(function() gui.Parent = parent end)
+            if set and gui.Parent then break end
+        end
+    end
+end
+
+-- Thông báo nhỏ ở cuối màn hình
+local toast = mk("TextLabel", {
+    Name = "Toast",
+    AnchorPoint = Vector2.new(0.5, 1),
+    Position = UDim2.new(0.5, 0, 1, -14),
+    Size = UDim2.new(0, 300, 0, 0),
+    AutomaticSize = Enum.AutomaticSize.Y,
+    BackgroundColor3 = C.navy,
+    BorderSizePixel = 0,
+    Font = Enum.Font.Arial,
+    TextSize = 14,
+    TextWrapped = true,
+    TextColor3 = C.text,
+    Text = "",
+    Visible = false,
+    ZIndex = 10001,
+}, gui)
+mk("UICorner", { CornerRadius = UDim.new(0, 6) }, toast)
+mk("UIPadding", {
+    PaddingTop = UDim.new(0, 6), PaddingBottom = UDim.new(0, 6),
+    PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8),
+}, toast)
+mk("UIStroke", { Color = C.peri, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, toast)
+
+local toastToken = 0
+local function notify(text, color)
+    toastToken = toastToken + 1
+    local mine = toastToken
+    toast.Text = text
+    toast.TextColor3 = color or C.text
+    toast.Visible = true
+    task.delay(3.5, function()
+        if toastToken == mine then
+            toast.Visible = false
+        end
+    end)
+end
+
+-- Theo dõi một thao tác kéo (chuột hoặc cảm ứng). onMove nhận độ lệch so với lúc bắt đầu.
+local function dragSession(began, onMove, onEnd)
+    local isMouse = began.UserInputType == Enum.UserInputType.MouseButton1
+    local startPos = began.Position
+    local moveConn, endConn
+    local function finish()
+        if moveConn then moveConn:Disconnect() moveConn = nil end
+        if endConn then endConn:Disconnect() endConn = nil end
+        if onEnd then onEnd() end
+    end
+    moveConn = UserInputService.InputChanged:Connect(function(input)
+        if (isMouse and input.UserInputType == Enum.UserInputType.MouseMovement)
+            or (not isMouse and input.UserInputType == Enum.UserInputType.Touch) then
+            onMove(input.Position - startPos)
+        end
+    end)
+    endConn = began.Changed:Connect(function()
+        if began.UserInputState == Enum.UserInputState.End then
+            finish()
+        end
+    end)
+end
+
+local function isPress(input)
+    return input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch
+end
+
+local zTop = 1
+local function bringToFront(frame)
+    zTop = zTop + 1
+    frame.ZIndex = zTop
+end
+
+local function makeDraggable(handle, frame)
+    handle.InputBegan:Connect(function(input)
+        if not isPress(input) then return end
+        bringToFront(frame)
+        local startPos = frame.Position
+        dragSession(input, function(d)
+            frame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + d.X,
+                startPos.Y.Scale, startPos.Y.Offset + d.Y
+            )
+        end)
+    end)
+end
+
+local function makeResizable(handle, frame, minW, minH)
+    handle.InputBegan:Connect(function(input)
+        if not isPress(input) then return end
+        bringToFront(frame)
+        local startSize = frame.AbsoluteSize
+        dragSession(input, function(d)
+            frame.Size = UDim2.new(
+                0, math.max(minW, startSize.X + d.X),
+                0, math.max(minH, startSize.Y + d.Y)
+            )
+        end)
+    end)
+end
+
+-- Tạo cửa sổ có thanh tiêu đề, nút — (ẩn bớt), X (ẩn GUI) và ◢ (đổi kích thước)
+local function makeWindow(name, title, pos, size, minW, minH, titleBg, titleFg)
+    local frame = mk("Frame", {
+        Name = name, Position = pos, Size = size,
+        BackgroundColor3 = C.navy, BorderSizePixel = 0,
+    }, gui)
+    mk("UICorner", { CornerRadius = UDim.new(0, 6) }, frame)
+    mk("UIStroke", { Color = C.peri, Thickness = 2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, frame)
+
+    local bar = mk("Frame", {
+        Name = "TitleBar", Size = UDim2.new(1, 0, 0, TITLE_H),
+        BackgroundColor3 = titleBg, BorderSizePixel = 0,
+    }, frame)
+    mk("UICorner", { CornerRadius = UDim.new(0, 6) }, bar)
+    mk("Frame", {
+        Position = UDim2.new(0, 0, 1, -8), Size = UDim2.new(1, 0, 0, 8),
+        BackgroundColor3 = titleBg, BorderSizePixel = 0,
+    }, bar)
+    mk("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.new(0, 8, 0, 0),
+        Size = UDim2.new(1, -70, 1, 0), Text = title, Font = Enum.Font.Arial,
+        TextSize = 20, TextColor3 = titleFg, TextXAlignment = Enum.TextXAlignment.Left,
+    }, bar)
+
+    local function barBtn(text, x)
+        return mk("TextButton", {
+            BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0),
+            Position = UDim2.new(1, x, 0, 0), Size = UDim2.new(0, 30, 1, 0),
+            Text = text, Font = Enum.Font.ArialBold, TextSize = 22, TextColor3 = titleFg,
+        }, bar)
+    end
+    local minBtn = barBtn("—", -34)
+    local closeBtn = barBtn("X", -4)
+
+    local body = mk("Frame", {
+        Name = "Body", BackgroundTransparency = 1,
+        Position = UDim2.new(0, 0, 0, TITLE_H), Size = UDim2.new(1, 0, 1, -TITLE_H),
+        ClipsDescendants = true,
+    }, frame)
+
+    local handle = mk("TextButton", {
+        Name = "ResizeHandle", AnchorPoint = Vector2.new(1, 1),
+        Position = UDim2.new(1, -1, 1, -1), Size = UDim2.new(0, 22, 0, 22),
+        BackgroundTransparency = 1, Text = "◢", Font = Enum.Font.Arial, TextSize = 20,
+        TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Right,
+        TextYAlignment = Enum.TextYAlignment.Bottom, ZIndex = 20,
+    }, frame)
+
+    makeDraggable(bar, frame)
+    makeResizable(handle, frame, minW, minH)
+
+    local minimized, savedSize = false, nil
+    minBtn.Activated:Connect(function()
+        minimized = not minimized
+        if minimized then
+            savedSize = frame.Size
+            body.Visible = false
+            handle.Visible = false
+            frame.Size = UDim2.new(savedSize.X.Scale, savedSize.X.Offset, 0, TITLE_H)
+        else
+            frame.Size = savedSize
+            body.Visible = true
+            handle.Visible = true
+        end
+    end)
+    closeBtn.Activated:Connect(function()
+        frame.Visible = false
+    end)
+
+    return { frame = frame, body = body }
+end
+
+local vp = (workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize) or Vector2.new(900, 600)
+local mainW = math.max(MIN_W, math.min(360, vp.X - 20))
+local mainH = math.max(MIN_H, math.min(470, vp.Y - 30))
+local panelW = math.max(250, math.min(340, vp.X - 20))
+local panelH = math.max(200, math.min(330, vp.Y - 30))
+
+local mainWin = makeWindow("ArrayGUI", "Array Placement Tool",
+    UDim2.new(0, 10, 0, 10), UDim2.new(0, mainW, 0, mainH), MIN_W, MIN_H, C.peri, C.ink)
+local panelWin = makeWindow("ArrayPanel", "Array Editor",
+    UDim2.new(0, math.max(10, vp.X - panelW - 10), 0, 10), UDim2.new(0, panelW, 0, panelH),
+    250, 200, C.navy, C.text)
+
+-- Cửa sổ Select Block và Cài đặt (mặc định ẩn, mở từ Menu)
+local selW = math.max(320, math.min(430, vp.X - 20))
+local selH = math.max(180, math.min(240, vp.Y - 30))
+local selectWin = makeWindow("SelectBlock", "inspector Parts",
+    UDim2.new(0.5, -math.floor(selW / 2), 0.5, -math.floor(selH / 2)), UDim2.new(0, selW, 0, selH),
+    320, 180, C.navy, C.text)
+selectWin.frame.BackgroundColor3 = C.peri
+selectWin.frame.Visible = false
+
+local settingsWin = makeWindow("SettingsWin", "Cài đặt",
+    UDim2.new(0.5, -130, 0.5, -105), UDim2.new(0, 260, 0, 210), 250, 200, C.navy, C.text)
+settingsWin.frame.Visible = false
+
+-- Menu: ☰ Menu -> Array / Array Panel / Select Block / ⚙
+local MENU_BG, MENU_ACTIVE = Color3.fromRGB(16, 28, 52), Color3.fromRGB(25, 115, 235)
+
+local menuBtn = mk("TextButton", {
+    Name = "MenuButton", AnchorPoint = Vector2.new(0, 0),
+    -- Nằm góc trên trái, ngay bên dưới thanh menu Roblox (ScreenGui dùng inset mặc định).
+    Position = UDim2.new(0, 8, 0, 6), Size = UDim2.new(0, 112, 0, 38),
+    BackgroundColor3 = Color3.fromRGB(10, 18, 40), TextColor3 = C.text, Text = "☰ Menu",
+    Font = Enum.Font.Arial, TextSize = 20, BorderSizePixel = 0, ZIndex = 10000,
+}, gui)
+mk("UICorner", { CornerRadius = UDim.new(0, 10) }, menuBtn)
+
+local menuPanel = mk("Frame", {
+    Name = "MenuPanel", AnchorPoint = Vector2.new(0, 0),
+    Position = UDim2.new(0, 8, 0, 48), Size = UDim2.new(0, 210, 0, 204),
+    BackgroundColor3 = MENU_BG, BorderSizePixel = 0, Visible = false, ZIndex = 10000,
+}, gui)
+mk("UICorner", { CornerRadius = UDim.new(0, 10) }, menuPanel)
+mk("UIStroke", { Color = Color3.fromRGB(40, 110, 200), Thickness = 2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, menuPanel)
+
+local function menuItem(y, icon, text, onClick)
+    local b = mk("TextButton", {
+        Name = text, Position = UDim2.new(0, 8, 0, y), Size = UDim2.new(1, -16, 0, 38),
+        BackgroundColor3 = MENU_ACTIVE, BackgroundTransparency = 1, BorderSizePixel = 0,
+        Text = "", AutoButtonColor = false,
+    }, menuPanel)
+    mk("UICorner", { CornerRadius = UDim.new(0, 6) }, b)
+    mk("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.new(0, 6, 0, 0), Size = UDim2.new(0, 30, 1, 0),
+        Text = icon, Font = Enum.Font.Arial, TextSize = 20, TextColor3 = C.text,
+    }, b)
+    mk("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.new(0, 46, 0, 0), Size = UDim2.new(1, -50, 1, 0),
+        Text = text, Font = Enum.Font.Arial, TextSize = 18, TextColor3 = C.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, b)
+    b.Activated:Connect(onClick)
+    return b
+end
+
+local function toggleWin(win)
+    if win.frame.Visible then
+        win.frame.Visible = false
+    else
+        win.frame.Visible = true
+        bringToFront(win.frame)
+    end
+end
+
+local itemArray    = menuItem(8,   "▦", "Array Placement Tool",        function() toggleWin(mainWin) end)
+local itemPanel    = menuItem(52,  "❐", "Array Editor",  function() toggleWin(panelWin) end)
+local itemSelect   = menuItem(96,  "⛶", "inspector Parts", function() toggleWin(selectWin) end)
+local itemSettings = menuItem(158, "⚙", "Cài đặt",      function() toggleWin(settingsWin) end)
+mk("Frame", {
+    Position = UDim2.new(0, 10, 0, 146), Size = UDim2.new(1, -20, 0, 1),
+    BackgroundColor3 = Color3.fromRGB(60, 80, 120), BorderSizePixel = 0,
+}, menuPanel)
+
+-- Mục nào có cửa sổ đang mở thì được tô sáng
+local function updateMenu()
+    local pairsList = {
+        { itemArray, mainWin }, { itemPanel, panelWin },
+        { itemSelect, selectWin }, { itemSettings, settingsWin },
+    }
+    for _, p in ipairs(pairsList) do
+        p[1].BackgroundTransparency = p[2].frame.Visible and 0 or 1
+    end
+end
+for _, w in ipairs({ mainWin, panelWin, selectWin, settingsWin }) do
+    w.frame:GetPropertyChangedSignal("Visible"):Connect(updateMenu)
+end
+menuBtn.Activated:Connect(function()
+    menuPanel.Visible = not menuPanel.Visible
+end)
+updateMenu()
+
+----------------------------------------------------------------
+-- GUI: ARRAYGUI
+----------------------------------------------------------------
+local body = mainWin.body
+
+-- Hàng đầu: Danh sách (n) + Thêm
+local header = mk("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 32) }, body)
+mk("TextLabel", {
+    BackgroundTransparency = 1, Position = UDim2.new(0, 10, 0, 0), Size = UDim2.new(0, 110, 1, 0),
+    Text = "Danh sách", Font = Enum.Font.Arial, TextSize = 19, TextColor3 = C.text,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, header)
+local countLabel = mk("TextLabel", {
+    BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0.5),
+    Position = UDim2.new(1, -84, 0.5, 0), Size = UDim2.new(0, 40, 1, 0),
+    Text = "(1)", Font = Enum.Font.Arial, TextSize = 18, TextColor3 = C.text,
+    TextXAlignment = Enum.TextXAlignment.Right,
+}, header)
+local addBtn = mk("TextButton", {
+    AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
+    Size = UDim2.new(0, 72, 0, 26), BackgroundColor3 = C.peri, TextColor3 = C.ink,
+    Text = "+ Thêm", Font = Enum.Font.ArialBold, TextSize = 15, BorderSizePixel = 0,
+}, header)
+mk("UICorner", { CornerRadius = UDim.new(0, 4) }, addBtn)
+
+-- Vùng giữa: nửa trên là danh sách, nửa dưới là Cài Đặt Chung
+local mid = mk("Frame", {
+    BackgroundTransparency = 1, Position = UDim2.new(0, 0, 0, 32), Size = UDim2.new(1, 0, 1, -72),
+}, body)
+
+local searchBox = mk("TextBox", {
+    Name = "ArraySearch", Position = UDim2.new(0, 6, 0, 0), Size = UDim2.new(1, -12, 0, 26),
+    BackgroundColor3 = C.box, TextColor3 = C.ink, PlaceholderColor3 = C.hint,
+    PlaceholderText = "Tìm Vector hoặc Resize...", Text = "", ClearTextOnFocus = false,
+    Font = Enum.Font.Arial, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
+    BorderSizePixel = 0,
+}, mid)
+mk("UICorner", { CornerRadius = UDim.new(0, 4) }, searchBox)
+mk("UIPadding", { PaddingLeft = UDim.new(0, 7), PaddingRight = UDim.new(0, 5) }, searchBox)
+
+local listFrame = mk("ScrollingFrame", {
+    Name = "List", BackgroundTransparency = 1, BorderSizePixel = 0,
+    Position = UDim2.new(0, 6, 0, 30), Size = UDim2.new(1, -12, 0.5, -32),
+    ScrollBarThickness = 4, ScrollingDirection = Enum.ScrollingDirection.Y,
+    CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, mid)
+mk("UIListLayout", { Padding = UDim.new(0, ROW_GAP), SortOrder = Enum.SortOrder.LayoutOrder }, listFrame)
+
+-- Ẩn/hiện thanh tìm kiếm (chỉnh trong Cài đặt)
+showSearch = true
+local function applySearchVisibility()
+    searchBox.Visible = showSearch
+    listFrame.Position = showSearch and UDim2.new(0, 6, 0, 30) or UDim2.new(0, 6, 0, 0)
+    listFrame.Size = showSearch and UDim2.new(1, -12, 0.5, -32) or UDim2.new(1, -12, 0.5, -2)
+end
+applySearchVisibility()
+
+local settings = mk("ScrollingFrame", {
+    Name = "Settings", BackgroundColor3 = C.navy2, BorderSizePixel = 0,
+    Position = UDim2.new(0, 6, 0.5, 2), Size = UDim2.new(1, -12, 0.5, -2),
+    ScrollBarThickness = 4, ScrollingDirection = Enum.ScrollingDirection.Y,
+    CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, mid)
+mk("UIPadding", {
+    PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 6),
+    PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 4),
+}, settings)
+mk("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, settings)
+
+mk("TextLabel", {
+    LayoutOrder = 0, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 26),
+    Text = "Cài Đặt Chung", Font = Enum.Font.Arial, TextSize = 20, TextColor3 = C.text,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, settings)
+
+local function makeField(order, labelText, placeholder)
+    mk("TextLabel", {
+        LayoutOrder = order * 2 - 1, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 16),
+        Text = labelText, Font = Enum.Font.Arial, TextSize = 13, TextColor3 = C.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, settings)
+    local row = mk("Frame", {
+        LayoutOrder = order * 2, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 28),
+    }, settings)
+    local box = mk("TextBox", {
+        Size = UDim2.new(1, -46, 1, 0), BackgroundColor3 = C.box, BorderSizePixel = 0,
+        TextColor3 = C.ink, PlaceholderText = placeholder, PlaceholderColor3 = C.hint,
+        Text = "", ClearTextOnFocus = false, Font = Enum.Font.Arial, TextSize = 14,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+    mk("UIPadding", { PaddingLeft = UDim.new(0, 6) }, box)
+    local clr = mk("TextButton", {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.new(0, 42, 1, 0),
+        BackgroundColor3 = C.dark, TextColor3 = C.text, Text = "Xóa",
+        Font = Enum.Font.Arial, TextSize = 14, BorderSizePixel = 0,
+    }, row)
+    -- Xóa = xóa nhanh văn bản và mở sẵn bàn phím để nhập lại
+    clr.Activated:Connect(function()
+        if isRunning then return end
+        box.Text = ""
+        box:CaptureFocus()
+    end)
+    return box
+end
+
+local pathBox   = makeField(1, "Path Block Textbox (mặc định)", DEFAULT_PATH)
+local vectorBox = makeField(2, "Vector", "0,0,0 (TextBox Vectors)")
+local resizeBox = makeField(3, "Resize", "0,0,0 (TextBox Size)")
+
+-- Hàng dưới cùng: Trang Trước / Trang Kế Tiếp / Execute
+local nav = mk("Frame", {
+    BackgroundTransparency = 1, Position = UDim2.new(0, 6, 1, -38), Size = UDim2.new(1, -12, 0, 32),
+}, body)
+
+local function navButton(text, x, w, bg, fg, bold, maxSize)
+    local b = mk("TextButton", {
+        Position = UDim2.new(x, 0, 0, 0), Size = UDim2.new(w, 0, 1, 0),
+        BackgroundColor3 = bg, TextColor3 = fg, Text = text, BorderSizePixel = 0,
+        Font = bold and Enum.Font.ArialBold or Enum.Font.Arial, TextScaled = true,
+    }, nav)
+    mk("UITextSizeConstraint", { MaxTextSize = maxSize, MinTextSize = 8 }, b)
+    mk("UIPadding", { PaddingLeft = UDim.new(0, 3), PaddingRight = UDim.new(0, 3) }, b)
+    return b
+end
+local backBtn = navButton("<Trang Trước", 0, 0.27, C.peri, C.ink, false, 14)
+local nextBtn = navButton("Trang Kế Tiếp>", 0.285, 0.27, C.peri, C.ink, false, 14)
+local execBtn = navButton("Execute", 0.57, 0.43, C.peri, C.ink, false, 22)
+
+----------------------------------------------------------------
+-- GUI: ARRAY PANEL
+----------------------------------------------------------------
+local pbody = panelWin.body
+
+local toolbar = mk("Frame", { BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 34) }, pbody)
+mk("UIListLayout", {
+    FillDirection = Enum.FillDirection.Horizontal,
+    HorizontalAlignment = Enum.HorizontalAlignment.Right,
+    VerticalAlignment = Enum.VerticalAlignment.Center,
+    Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder,
+}, toolbar)
+mk("UIPadding", { PaddingRight = UDim.new(0, 6) }, toolbar)
+
+local function toolButton(text, order)
+    local b = mk("TextButton", {
+        LayoutOrder = order, Size = UDim2.new(0, 56, 0, 26), BackgroundColor3 = C.peri,
+        TextColor3 = C.ink, Text = text, Font = Enum.Font.Arial, TextSize = 16, BorderSizePixel = 0,
+    }, toolbar)
+    mk("UICorner", { CornerRadius = UDim.new(0, 4) }, b)
+    return b
+end
+local applyBtn = toolButton("Apply", 1)
+local clearBtn = toolButton("Xóa", 2)
+local copyAllBtn = toolButton("Copy", 3)
+local exportBtn = toolButton("Export", 4)
+local importBtn = toolButton("Import", 5)
+
+local textScroll = mk("ScrollingFrame", {
+    Name = "Editor", BackgroundColor3 = C.box, BorderSizePixel = 0,
+    Position = UDim2.new(0, 6, 0, 36), Size = UDim2.new(1, -12, 1, -44),
+    ScrollBarThickness = 8, ScrollingDirection = Enum.ScrollingDirection.XY,
+    CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.XY,
+}, pbody)
+mk("UICorner", { CornerRadius = UDim.new(0, 5) }, textScroll)
+
+local editor = mk("TextBox", {
+    Name = "Text", BackgroundTransparency = 1, BorderSizePixel = 0,
+    AutomaticSize = Enum.AutomaticSize.XY, Size = UDim2.new(0, 100, 0, 100),
+    MultiLine = true, ClearTextOnFocus = false, TextWrapped = false,
+    TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
+    Font = Enum.Font.Code, TextSize = 13, TextColor3 = C.ink, Text = "",
+    PlaceholderText = "Dán mã Array vào đây rồi bấm Apply", PlaceholderColor3 = C.hint,
+}, textScroll)
+mk("UIPadding", {
+    PaddingLeft = UDim.new(0, 6), PaddingTop = UDim.new(0, 4),
+    PaddingRight = UDim.new(0, 6), PaddingBottom = UDim.new(0, 4),
+}, editor)
+
+-- Ô soạn thảo luôn đầy khung; dài/rộng hơn thì thanh cuộn xuất hiện
+local function fitEditor()
+    local s = textScroll.AbsoluteSize
+    editor.Size = UDim2.new(0, math.max(0, s.X - 10), 0, math.max(0, s.Y - 10))
+end
+textScroll:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitEditor)
+fitEditor()
+
+-- File picker: danh sách file dạng dọc trong ArrayPlacementTool.
+local loadBoxes, refreshAll, setEditorText, dirty
+local fileWin = makeWindow("ArrayFiles", "ArrayPlacementTool - Files",
+    UDim2.new(0.5, -145, 0.5, -165), UDim2.new(0, 290, 0, 330), 250, 220, C.navy, C.text)
+fileWin.frame.Visible = false
+local fileNameBox = mk("TextBox", {
+    Position = UDim2.new(0, 8, 0, 4), Size = UDim2.new(1, -16, 0, 28),
+    BackgroundColor3 = C.box, TextColor3 = C.ink, Text = "Array1.txt",
+    PlaceholderText = "Tên file (ví dụ Array1.txt)", ClearTextOnFocus = false,
+    Font = Enum.Font.Arial, TextSize = 14, BorderSizePixel = 0,
+}, fileWin.body)
+local fileList = mk("ScrollingFrame", {
+    Position = UDim2.new(0, 8, 0, 38), Size = UDim2.new(1, -16, 1, -78),
+    BackgroundColor3 = C.navy2, BorderSizePixel = 0, ScrollBarThickness = 5,
+    CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ScrollingDirection = Enum.ScrollingDirection.Y,
+}, fileWin.body)
+mk("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, fileList)
+mk("UIPadding", {PaddingTop = UDim.new(0, 4), PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4)}, fileList)
+local fileMode = "import"
+local function cleanFileName(name)
+    name = tostring(name or ""):gsub("[/\\\\]", ""):gsub("%.%.", "")
+    name = name:gsub("^%s+", ""):gsub("%s+$", "")
+    if name == "" then return nil end
+    if not name:match("%.[Tt][Xx][Tt]$") then name = name .. ".txt" end
+    return name
+end
+local function refreshFileList()
+    for _, child in ipairs(fileList:GetChildren()) do
+        if child:IsA("TextButton") or child:IsA("TextLabel") then child:Destroy() end
+    end
+    local names = {}
+    local ok, files = pcall(function() return listfiles(ROOT_FOLDER) end)
+    if ok and type(files) == "table" then
+        for _, path in ipairs(files) do
+            local name = tostring(path):match("([^/\\\\]+)$") or tostring(path)
+            if name:lower():match("%.txt$") then names[#names + 1] = name end
+        end
+    end
+    table.sort(names, function(a,b) return a:lower() < b:lower() end)
+    if #names == 0 then
+        local empty = mk("TextLabel", {Size = UDim2.new(1, -4, 0, 28), BackgroundTransparency = 1,
+            Text = "Chưa có file .txt trong folder", TextColor3 = C.text, Font = Enum.Font.Arial, TextSize = 13}, fileList)
+    end
+    for i, name in ipairs(names) do
+        local b = mk("TextButton", {LayoutOrder = i, Size = UDim2.new(1, -4, 0, 28),
+            BackgroundColor3 = C.row, BorderSizePixel = 0, Text = "  " .. name,
+            TextColor3 = C.text, Font = Enum.Font.Arial, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left}, fileList)
+        mk("UICorner", {CornerRadius = UDim.new(0, 4)}, b)
+        b.Activated:Connect(function()
+            fileNameBox.Text = name
+            if fileMode == "import" then
+                local okRead, content = pcall(function() return readfile(ROOT_FOLDER .. "/" .. name) end)
+                if not okRead then notify("Không đọc được file: " .. name, C.red) return end
+                local items, err = parseArrayText(content)
+                if not items then notify("Import lỗi: " .. tostring(err), C.red) return end
+                BlockArray = items
+                selected = items[1]
+                holding = nil
+                dirty = false
+                loadBoxes()
+                refreshAll()
+                setEditorText(buildText())
+                notify("Đã Import " .. name .. " (" .. #items .. " phần tử).", C.green)
+                toggleWin(fileWin)
+            end
+        end)
+    end
+end
+local fileActionBtn = mk("TextButton", {Position = UDim2.new(0, 8, 1, -34), Size = UDim2.new(1, -16, 0, 28),
+    BackgroundColor3 = C.peri, BorderSizePixel = 0, TextColor3 = C.ink, Font = Enum.Font.ArialBold,
+    TextSize = 14, Text = "Export Array"}, fileWin.body)
+fileActionBtn.Activated:Connect(function()
+    local name = cleanFileName(fileNameBox.Text)
+    if not name then notify("Nhập tên file trước.", C.yellow) return end
+    if fileMode == "export" then
+        local okWrite, err = pcall(function() writefile(ROOT_FOLDER .. "/" .. name, buildText()) end)
+        if not okWrite then notify("Export lỗi: " .. tostring(err), C.red) return end
+        notify("Đã Export: " .. name, C.green)
+        refreshFileList()
+        persistConfig()
+    else
+        refreshFileList()
+        notify("Chọn file trong danh sách để Import.", C.yellow)
+    end
+end)
+local function openFileWindow(mode)
+    fileMode = mode
+    fileActionBtn.Text = mode == "export" and "Export Array" or "Làm mới danh sách"
+    if mode == "export" then
+        fileNameBox.Text = cleanFileName(fileNameBox.Text) or "Array1.txt"
+    end
+    refreshFileList()
+    fileWin.frame.Visible = true
+    bringToFront(fileWin.frame)
+end
+exportBtn.Activated:Connect(function() openFileWindow("export") end)
+importBtn.Activated:Connect(function() openFileWindow("import") end)
+fileActionBtn.Activated:Connect(function()
+    if fileMode == "import" then refreshFileList() end
+end)
+
+-- Văn bản trong Panel tự đồng bộ với danh sách, trừ khi người dùng đang soạn dở
+local programmatic = false
+dirty = false
+setEditorText = function(t)
+    programmatic = true
+    editor.Text = t
+    programmatic = false
+    dirty = false
+end
+editor:GetPropertyChangedSignal("Text"):Connect(function()
+    if not programmatic then dirty = true end
+end)
+local function syncPanel()
+    if not dirty then
+        setEditorText(buildText())
+    end
+end
+
+----------------------------------------------------------------
+-- LOGIC: DANH SÁCH
+----------------------------------------------------------------
+local selectItem, deleteItem
+local rowCache = {}
+
+local function statusColor(s)
+    if s == "run" then return C.yellow end
+    if s == "ok" then return C.green end
+    if s == "fail" then return C.red end
+    return C.dark
+end
+
+local function createRow(it)
+    local row = mk("TextButton", {
+        Name = "Row", AutoButtonColor = false, Text = "", BorderSizePixel = 0,
+        BackgroundColor3 = C.row, Size = UDim2.new(1, -6, 0, ROW_H),
+    }, listFrame)
+    mk("UICorner", { CornerRadius = UDim.new(0, 4) }, row)
+    local r = { frame = row }
+
+    r.idx = mk("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.new(0, 2, 0, 0), Size = UDim2.new(0, 24, 1, 0),
+        Font = Enum.Font.Arial, TextSize = 18, TextColor3 = C.text, Text = "",
+    }, row)
+    r.status = mk("TextLabel", {
+        Position = UDim2.new(0, 28, 0.5, -13), Size = UDim2.new(0, 26, 0, 26),
+        BackgroundTransparency = 1, BorderSizePixel = 0, BackgroundColor3 = C.dark,
+        Text = "⬡", Font = Enum.Font.ArialBold, TextSize = 23,
+        TextColor3 = C.peri, TextXAlignment = Enum.TextXAlignment.Center,
+        TextYAlignment = Enum.TextYAlignment.Center,
+    }, row)
+
+    local function line(y, bold, size)
+        return mk("TextLabel", {
+            BackgroundTransparency = 1, Position = UDim2.new(0, 58, 0, y), Size = UDim2.new(1, -176, 0, 16),
+            Font = bold and Enum.Font.ArialBold or Enum.Font.Arial, TextSize = size,
+            TextColor3 = C.text, TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd, Text = "",
+        }, row)
+    end
+    r.title = line(3, true, 14)
+    r.vec = line(19, false, 11)
+    r.size = line(35, false, 11)
+
+    local box = mk("Frame", {
+        BackgroundTransparency = 1, AnchorPoint = Vector2.new(1, 0),
+        Position = UDim2.new(1, -4, 0, 0), Size = UDim2.new(0, 112, 1, 0),
+    }, row)
+    mk("UIListLayout", {
+        FillDirection = Enum.FillDirection.Horizontal,
+        HorizontalAlignment = Enum.HorizontalAlignment.Right,
+        VerticalAlignment = Enum.VerticalAlignment.Center,
+        Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder,
+    }, box)
+    local function small(text, w, order)
+        local b = mk("TextButton", {
+            LayoutOrder = order, Size = UDim2.new(0, w, 0, 28), BackgroundColor3 = C.dark,
+            TextColor3 = C.text, Text = text, Font = Enum.Font.Arial, TextSize = 13, BorderSizePixel = 0,
+        }, box)
+        mk("UICorner", { CornerRadius = UDim.new(0, 4) }, b)
+        return b
+    end
+    local copyB = small("Copy", 38, 1)
+    local delB = small("Xóa", 33, 2)
+    r.hold = small("Giữ", 33, 3)
+
+    row.Activated:Connect(function() selectItem(it) end)
+    delB.Activated:Connect(function() deleteItem(it) end)
+    copyB.Activated:Connect(function()
+        local text = entryText(indexOf(it) or 0, it)
+        if copyText(text) then
+            notify("Đã copy Block #" .. tostring(indexOf(it)) .. ".", C.green)
+        else
+            notify("Không có setclipboard, đã in ra Output.", C.yellow)
+        end
+    end)
+
+    -- Giữ + kéo lên/xuống để đổi thứ tự
+    r.hold.InputBegan:Connect(function(input)
+        if isRunning or not isPress(input) then return end
+        local startIdx = indexOf(it)
+        if not startIdx then return end
+        holding = it
+        listFrame.ScrollingEnabled = false
+        refreshAll()
+        dragSession(input, function(d)
+            local target = startIdx + math.floor(d.Y / (ROW_H + ROW_GAP) + 0.5)
+            target = math.clamp(target, 1, #BlockArray)
+            local cur = indexOf(it)
+            if cur and target ~= cur then
+                table.remove(BlockArray, cur)
+                table.insert(BlockArray, target, it)
+                refreshAll()
+            end
+        end, function()
+            holding = nil
+            listFrame.ScrollingEnabled = true
+            refreshAll()
+        end)
+    end)
+
+    rowCache[it] = r
+    return r
+end
+
+local function refreshList()
+    local present = {}
+    for _, it in ipairs(BlockArray) do
+        present[it] = true
+    end
+    for it, r in pairs(rowCache) do
+        if not present[it] then
+            r.frame:Destroy()
+            rowCache[it] = nil
+        end
+    end
+
+    local query = string.lower(trim(searchBox and searchBox.Text or ""))
+    local visibleOrder = 0
+    for i, it in ipairs(BlockArray) do
+        local r = rowCache[it] or createRow(it)
+        local vecText = textCFFull(it.CF)
+        local sizeText = textVec(it.Resize)
+        local matches = query == "" or string.find(string.lower(vecText), query, 1, true)
+            or string.find(string.lower(sizeText), query, 1, true)
+            or string.find(string.lower("block " .. i), query, 1, true)
+        r.frame.Visible = not not matches
+        if matches then
+            visibleOrder += 1
+            r.frame.LayoutOrder = visibleOrder
+        else
+            r.frame.LayoutOrder = i + #BlockArray
+        end
+        r.frame.BackgroundColor3 = (it == selected) and C.rowSel or C.row
+        r.idx.Text = tostring(i)
+        r.title.Text = "Block #" .. i
+        r.vec.Text = vecText
+        r.size.Text = "Size " .. sizeText
+        r.status.Text = (it == selected) and "⬢" or "⬡"
+        r.status.TextColor3 = (it == selected) and C.yellow or statusColor(it.Status)
+        r.hold.BackgroundColor3 = (it == holding) and C.peri or C.dark
+        r.hold.TextColor3 = (it == holding) and C.ink or C.text
+    end
+
+    countLabel.Text = "(" .. #BlockArray .. ")"
+    local si = indexOf(selected) or 1
+    backBtn.BackgroundTransparency = (si <= 1) and 0.6 or 0
+    nextBtn.BackgroundTransparency = (si >= #BlockArray) and 0.6 or 0
+end
+
+loadBoxes = function()
+    if not selected then return end
+    pathBox.Text = selected.PathBlock or ""
+    vectorBox.Text = textCFShort(selected.CF)
+    resizeBox.Text = textVec(selected.Resize)
+end
+
+-- Cuộn để dòng đang chọn luôn nhìn thấy được
+local function ensureVisible()
+    task.delay(0.05, function()
+        local i = indexOf(selected)
+        if not i then return end
+        local top = (i - 1) * (ROW_H + ROW_GAP)
+        local bottom = top + ROW_H
+        local pos = listFrame.CanvasPosition.Y
+        local view = listFrame.AbsoluteSize.Y
+        if top < pos then
+            listFrame.CanvasPosition = Vector2.new(0, top)
+        elseif bottom > pos + view then
+            listFrame.CanvasPosition = Vector2.new(0, bottom - view + ROW_GAP)
+        end
+    end)
+end
+
+refreshAll = function()
+    refreshList()
+    syncPanel()
+end
+
+searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    refreshList()
+end)
+
+-- Lưu nội dung 3 Textbox vào phần tử đang chọn. Trả về true nếu cả 3 hợp lệ.
+local function saveFromBoxes(silent)
+    local it = selected
+    if not it then return false end
+
+    it.PathBlock = trim(pathBox.Text)
+    local allOk = true
+
+    local cf, err = parseCFrame(vectorBox.Text)
+    if cf then
+        it.CF = cf
+    else
+        allOk = false
+        if not silent then notify("Vector không hợp lệ: " .. err, C.red) end
+    end
+
+    local sz, err2 = parseSize(resizeBox.Text)
+    if sz then
+        it.Resize = sz
+    else
+        allOk = false
+        if not silent then notify("Resize không hợp lệ: " .. err2, C.red) end
+    end
+    return allOk
+end
+
+selectItem = function(it)
+    if not it then return end
+    if not isRunning then saveFromBoxes(true) end
+    selected = it
+    loadBoxes()
+    refreshAll()
+    ensureVisible()
+end
+
+deleteItem = function(it)
+    if isRunning then return end
+    local i = indexOf(it)
+    if not i then return end
+    if #BlockArray <= 1 then
+        -- Luôn giữ ít nhất 1 phần tử: đặt lại về mặc định
+        local n = newItem()
+        BlockArray[1] = n
+        selected = n
+        loadBoxes()
+        refreshAll()
+        notify("Chỉ còn 1 vị trí nên đã đặt lại về mặc định.")
+        return
+    end
+    -- Chỉ xóa dữ liệu trong Array, không đụng tới Block trong Workspace
+    table.remove(BlockArray, i)
+    if selected == it then
+        selected = BlockArray[math.min(i, #BlockArray)]
+        loadBoxes()
+    end
+    refreshAll()
+    notify("Đã xóa. Còn " .. #BlockArray .. " vị trí.")
+end
+
+-- Khi sửa Textbox: cập nhật phần tử đang chọn; sai định dạng thì trả về giá trị đã lưu
+local function onBoxEdited()
+    if isRunning or not selected then return end
+    local ok = saveFromBoxes(false)
+    if not ok then
+        vectorBox.Text = textCFShort(selected.CF)
+        resizeBox.Text = textVec(selected.Resize)
+    else
+        notify("Đã lưu vị trí " .. tostring(indexOf(selected)) .. ".", C.green)
+    end
+    refreshAll()
+end
+pathBox.FocusLost:Connect(onBoxEdited)
+vectorBox.FocusLost:Connect(onBoxEdited)
+resizeBox.FocusLost:Connect(onBoxEdited)
+
+addBtn.Activated:Connect(function()
+    if isRunning then return end
+    saveFromBoxes(true)
+    local path = trim(pathBox.Text)
+    if path == "" then path = DEFAULT_PATH end
+    local it = newItem(path) -- phần tử mới dùng Path đang nhập
+    table.insert(BlockArray, it)
+    selectItem(it)
+    notify("Đã thêm vị trí " .. #BlockArray .. ".", C.green)
+end)
+
+backBtn.Activated:Connect(function()
+    local i = indexOf(selected) or 1
+    if i > 1 then selectItem(BlockArray[i - 1]) end
+end)
+
+nextBtn.Activated:Connect(function()
+    local i = indexOf(selected) or 1
+    if i < #BlockArray then selectItem(BlockArray[i + 1]) end
+end)
+
+----------------------------------------------------------------
+-- LOGIC: ARRAY PANEL
+----------------------------------------------------------------
+applyBtn.Activated:Connect(function()
+    if isRunning then
+        notify("Đang chạy, không thể Apply.", C.yellow)
+        return
+    end
+    local items, err = parseArrayText(editor.Text)
+    if not items then
+        notify("Apply lỗi: " .. tostring(err), C.red)
+        return
+    end
+    BlockArray = items
+    selected = items[1]
+    holding = nil
+    dirty = false
+    loadBoxes()
+    refreshAll()
+    setEditorText(buildText())
+    persistConfig()
+    notify("Đã Apply " .. #items .. " phần tử.", C.green)
+end)
+
+clearBtn.Activated:Connect(function()
+    editor.Text = "" -- tính là người dùng đã sửa: không tự ghi đè nữa cho tới khi Apply
+end)
+
+copyAllBtn.Activated:Connect(function()
+    -- Copy luôn dữ liệu Array hiện tại, không copy phần văn bản người dùng đang soạn dở.
+    local arrayValue = buildText()
+    if #BlockArray == 0 then
+        notify("Array đang trống.", C.yellow)
+        return
+    end
+    if copyText(arrayValue) then
+        notify("Đã copy Value của Array (" .. #BlockArray .. " Block).", C.green)
+    else
+        notify("Không có setclipboard, Value của Array đã in ra Output.", C.yellow)
+    end
+end)
+
+----------------------------------------------------------------
+-- LOGIC PLACE / RESIZE / MOVE
+----------------------------------------------------------------
+-- Phần màu của Block có thể tên "ColorPart" hoặc "Part"
+local COLOR_PART_NAMES = { "ColorPart", "Part" }
+local function findColorPart(block)
+    if not block then return nil end
+    for _, n in ipairs(COLOR_PART_NAMES) do
+        local c = block:FindFirstChild(n)
+        if c and c:IsA("BasePart") then return c end
+    end
+    return nil
+end
+
+local function getContainer()
+    local c, err = resolvePath(CONFIG.BuildContainer)
+    if not c then
+        return nil, "Không tìm thấy BuildContainer (" .. CONFIG.BuildContainer .. "): " .. tostring(err)
+    end
+    return c
+end
+
+-- Gọi PlaceBlock và xác định chính xác Block vừa tạo.
+-- (1) nếu server trả về Instance hợp lệ thì dùng nó;
+-- (2) nếu không, theo dõi ChildAdded của container và chỉ nhận khi có ĐÚNG 1 Block mới.
+local function placeBlock(blockTemplate, cf)
+    local remote, rerr = getRemote("PlaceBlock")
+    if not remote then return nil, rerr end
+
+    local container, cerr = getContainer()
+    if not container then return nil, cerr end
+
+    local existing = {}
+    for _, c in ipairs(container:GetChildren()) do
+        existing[c] = true
+    end
+
+    local newChildren = {}
+    local conn = container.ChildAdded:Connect(function(child)
+        if not existing[child] then
+            newChildren[#newChildren + 1] = child
+        end
+    end)
+
+    local ok, ret = pcall(function()
+        return remote:InvokeServer(
+            blockTemplate,
+            cf,
+            BrickColor.new(CONFIG.BlockColor),
+            CONFIG.BlockMaterial
+        )
+    end)
+
+    if not ok then
+        conn:Disconnect()
+        return nil, "PlaceBlock lỗi: " .. tostring(ret)
+    end
+    if ret == false then
+        conn:Disconnect()
+        return nil, "Server từ chối PlaceBlock (trả về false)"
+    end
+
+    -- Chờ Block mới xuất hiện
+    local waited = 0
+    while #newChildren == 0 and waited < CONFIG.PlaceWaitTimeout do
+        task.wait(0.05)
+        waited = waited + 0.05
+    end
+    task.wait(CONFIG.SettleTime) -- chờ thêm để phát hiện trường hợp nhiều Block cùng xuất hiện
+    conn:Disconnect()
+
+    local block
+    if typeof(ret) == "Instance" and ret.Parent then
+        block = ret -- server trả về Block, đã xác minh còn tồn tại
+    elseif #newChildren == 1 then
+        block = newChildren[1]
+    elseif #newChildren == 0 then
+        return nil, "Không phát hiện Block mới trong " .. container:GetFullName()
+            .. " (kiểm tra lại CONFIG.BuildContainer)"
+    else
+        return nil, "Phát hiện " .. #newChildren .. " Block mới cùng lúc, không xác định được Block đúng"
+    end
+
+    -- Xác minh ColorPart trước khi dùng
+    local colorPart = findColorPart(block)
+    local waitedCP = 0
+    while not colorPart and waitedCP < CONFIG.ColorPartTimeout do
+        task.wait(0.1)
+        waitedCP = waitedCP + 0.1
+        colorPart = findColorPart(block)
+    end
+    if not colorPart then
+        return nil, "Block '" .. block.Name .. "' không có 'ColorPart'"
+    end
+    return block, colorPart
+end
+
+local function resizeBlock(block, colorPart, cf, size)
+    local remote, rerr = getRemote("CommitResize")
+    if not remote then return false, rerr end
+    if not block.Parent or not colorPart.Parent then
+        return false, "Block đã bị xóa trước khi Resize"
+    end
+    local ok, ret = pcall(function()
+        return remote:InvokeServer(block, {
+            colorPart,
+            cf,
+            Vector3.new(size.X, size.Y, size.Z),
+        })
+    end)
+    if not ok then return false, "CommitResize lỗi: " .. tostring(ret) end
+    if ret == false then return false, "Server từ chối CommitResize" end
+    return true
+end
+
+local function moveBlock(block, cf)
+    local remote, rerr = getRemote("CommitMove")
+    if not remote then return false, rerr end
+    if not block.Parent then
+        return false, "Block đã bị xóa trước khi Move"
+    end
+    local ok, ret = pcall(function()
+        return remote:InvokeServer(block, cf)
+    end)
+    if not ok then return false, "CommitMove lỗi: " .. tostring(ret) end
+    if ret == false then return false, "Server từ chối CommitMove" end
+    return true
+end
+
+-- Cơ chế Copy nhiều block (lấy từ MasterTool V49):
+-- Block đầu tiên đặt tại đích; các block còn lại đặt tạm trên cao, cách xa nhau.
+-- Chỉ sau khi tạo xong tất cả mới Resize/Move chúng về CFrame đích.
+local STAGE_GAP = 10
+local STAGE_HEIGHT = 60
+
+local function assignStageCFrames(snapshot)
+    for _, job in ipairs(snapshot) do
+        job.PlaceCF = job.CF
+    end
+    if #snapshot <= 1 then return end
+
+    local maxDim, maxY = 4.5, -math.huge
+    local minX, maxX, minZ, maxZ = math.huge, -math.huge, math.huge, -math.huge
+
+    for _, job in ipairs(snapshot) do
+        local pos = job.CF.Position
+        maxDim = math.max(maxDim, job.Resize.X, job.Resize.Y, job.Resize.Z)
+        maxY = math.max(maxY, pos.Y + math.max(job.Resize.X, job.Resize.Y, job.Resize.Z))
+        minX, maxX = math.min(minX, pos.X), math.max(maxX, pos.X)
+        minZ, maxZ = math.min(minZ, pos.Z), math.max(maxZ, pos.Z)
+    end
+
+    local container = getContainer()
+    if container then
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("PVInstance") then
+                local ok, pivot = pcall(function() return child:GetPivot() end)
+                if ok and pivot then
+                    maxY = math.max(maxY, pivot.Position.Y + 20)
+                end
+            end
+        end
+    end
+
+    local spacing = maxDim + STAGE_GAP
+    local count = #snapshot - 1
+    local cols = math.ceil(math.sqrt(count))
+    local rows = math.ceil(count / cols)
+    local centerX, centerZ = (minX + maxX) / 2, (minZ + maxZ) / 2
+    local stageY = maxY + STAGE_HEIGHT
+
+    for i = 2, #snapshot do
+        local index = i - 2
+        local row, col = math.floor(index / cols), index % cols
+        local pos = Vector3.new(
+            centerX + (col - (cols - 1) / 2) * spacing,
+            stageY,
+            centerZ + (row - (rows - 1) / 2) * spacing
+        )
+        snapshot[i].PlaceCF = CFrame.new(pos)
+    end
+end
+
+-- Kiểm tra toàn bộ Array trước khi chạy. Trả về danh sách template đã phân giải.
+local function validateAll()
+    if #BlockArray == 0 then
+        return nil, "Array trống"
+    end
+    local templates = {}
+    for i, it in ipairs(BlockArray) do
+        local inst, err = resolvePath(it.PathBlock)
+        if not inst then
+            return nil, string.format("Vị trí %d: %s", i, err)
+        end
+        if typeof(it.CF) ~= "CFrame" then
+            return nil, string.format("Vị trí %d: Vector không hợp lệ", i)
+        end
+        if typeof(it.Resize) ~= "Vector3" or it.Resize.X <= 0 or it.Resize.Y <= 0 or it.Resize.Z <= 0 then
+            return nil, string.format("Vị trí %d: Resize không hợp lệ", i)
+        end
+        templates[i] = inst
+    end
+    return templates
+end
+
+local function setLocked(locked)
+    isRunning = locked
+    for _, box in ipairs({ pathBox, vectorBox, resizeBox }) do
+        box.TextEditable = not locked
+    end
+    execBtn.Text = locked and "Đang chạy..." or "Execute"
+    execBtn.BackgroundTransparency = locked and 0.5 or 0
+end
+
+-- Đặt nhiều Block cùng lúc. Mỗi job nhận lại đúng Block của mình:
+-- ưu tiên Instance server trả về; nếu không có thì ghép với Block mới có ColorPart gần PlaceCF nhất.
+local function placeBatch(batch)
+    local remote, rerr = getRemote("PlaceBlock")
+    local container, cerr = getContainer()
+    if not remote or not container then
+        for _, job in ipairs(batch) do
+            job.Err = rerr or cerr
+        end
+        return
+    end
+
+    local existing = {}
+    for _, c in ipairs(container:GetChildren()) do
+        existing[c] = true
+    end
+    local newChildren = {}
+    local conn = container.ChildAdded:Connect(function(child)
+        if not existing[child] then
+            newChildren[#newChildren + 1] = child
+        end
+    end)
+
+    local pending = #batch
+    for _, job in ipairs(batch) do
+        task.spawn(function()
+            local ok, ret = pcall(function()
+                return remote:InvokeServer(
+                    job.Template, job.PlaceCF,
+                    BrickColor.new(CONFIG.BlockColor), CONFIG.BlockMaterial
+                )
+            end)
+            if not ok then
+                job.Err = "PlaceBlock lỗi: " .. tostring(ret)
+            elseif ret == false then
+                job.Err = "Server từ chối PlaceBlock"
+            elseif typeof(ret) == "Instance" and ret.Parent then
+                job.Returned = ret
+            end
+            pending -= 1
+        end)
+    end
+
+    local waited = 0
+    while pending > 0 and waited < CONFIG.PlaceWaitTimeout do
+        task.wait(0.05)
+        waited += 0.05
+    end
+    task.wait(CONFIG.SettleTime)
+    conn:Disconnect()
+
+    local used = {}
+    for _, job in ipairs(batch) do
+        if not job.Err then
+            local block = job.Returned
+            if not (block and block.Parent) then
+                local best, bestDist = nil, math.huge
+                for _, child in ipairs(newChildren) do
+                    if child.Parent and not used[child] then
+                        local cp = findColorPart(child)
+                        if cp then
+                            local d = (cp.Position - job.PlaceCF.Position).Magnitude
+                            if d < bestDist then
+                                best, bestDist = child, d
+                            end
+                        end
+                    end
+                end
+                block = best
+            end
+
+            if block and block.Parent then
+                used[block] = true
+                job.Block = block
+                job.ColorPart = findColorPart(block)
+                local w = 0
+                while not job.ColorPart and w < CONFIG.ColorPartTimeout do
+                    task.wait(0.1)
+                    w += 0.1
+                    job.ColorPart = findColorPart(block)
+                end
+                if not job.ColorPart then
+                    job.Err = "Block '" .. block.Name .. "' không có ColorPart/Part"
+                end
+            else
+                job.Err = "Không xác định được Block vừa đặt (kiểm tra BuildContainer)"
+            end
+        end
+    end
+end
+
+execBtn.Activated:Connect(function()
+    if isRunning then return end -- chặn chạy chồng lên nhau
+    saveFromBoxes(true)
+    refreshAll()
+
+    local templates, verr = validateAll()
+    if not templates then
+        notify("Lỗi kiểm tra: " .. verr, C.red)
+        return
+    end
+
+    setLocked(true)
+    for _, it in ipairs(BlockArray) do
+        it.Status = nil
+    end
+    refreshList()
+
+    task.spawn(function()
+        local total = #BlockArray
+        local success, failed = 0, 0
+        local errors = {}
+
+        -- Chụp dữ liệu để thay đổi UI trong lúc chạy không ảnh hưởng quy trình
+        local snapshot = {}
+        for i, it in ipairs(BlockArray) do
+            snapshot[i] = { Item = it, CF = it.CF, Resize = it.Resize, Template = templates[i] }
+        end
+
+        -- Bước 1: tạo Block theo đợt. Block đầu tiên ở đích, các Block sau ở vị trí tạm xa nhau.
+        assignStageCFrames(snapshot)
+        for i, job in ipairs(snapshot) do
+            job.Index = i
+        end
+        local placed = {}
+        local stop = false
+        for startIdx = 1, total, CONFIG.BatchSize do
+            local batch = {}
+            for i = startIdx, math.min(startIdx + CONFIG.BatchSize - 1, total) do
+                batch[#batch + 1] = snapshot[i]
+                snapshot[i].Item.Status = "run"
+            end
+            execBtn.Text = string.format("Đang đặt %d/%d", startIdx, total)
+            refreshList()
+
+            placeBatch(batch)
+
+            for _, job in ipairs(batch) do
+                if job.Err then
+                    failed = failed + 1
+                    job.Item.Status = "fail"
+                    errors[#errors + 1] = string.format("#%d: %s", job.Index, tostring(job.Err))
+                    warn("[BlockArrayTool] Vị trí " .. job.Index .. " lỗi khi Place: " .. tostring(job.Err))
+                    if CONFIG.StopOnError then stop = true end
+                else
+                    placed[#placed + 1] = job
+                end
+            end
+            refreshList()
+            if stop then break end
+            task.wait(CONFIG.StepDelay)
+        end
+
+        -- Bước 2: đưa Block về đích và đặt kích thước, theo đợt (các Block trong đợt chạy song song).
+        for startIdx = 1, #placed, CONFIG.BatchSize do
+            local batch = {}
+            for i = startIdx, math.min(startIdx + CONFIG.BatchSize - 1, #placed) do
+                batch[#batch + 1] = placed[i]
+            end
+            execBtn.Text = string.format("Đang hoàn tất %d/%d", startIdx, #placed)
+
+            local pending = #batch
+            for _, job in ipairs(batch) do
+                task.spawn(function()
+                    local stepOk, stepErr = moveBlock(job.Block, job.CF)
+                    if stepOk then
+                        stepOk, stepErr = resizeBlock(job.Block, job.ColorPart, job.CF, job.Resize)
+                    end
+                    job.StepOk, job.StepErr = stepOk, stepErr
+                    pending -= 1
+                end)
+            end
+            while pending > 0 do
+                task.wait(0.05)
+            end
+
+            for _, job in ipairs(batch) do
+                if job.StepOk then
+                    success = success + 1
+                    job.Item.Status = "ok"
+                else
+                    failed = failed + 1
+                    job.Item.Status = "fail"
+                    errors[#errors + 1] = string.format("#%d: %s", job.Index, tostring(job.StepErr))
+                    warn("[BlockArrayTool] Vị trí " .. job.Index .. " lỗi khi hoàn tất: " .. tostring(job.StepErr))
+                end
+            end
+            refreshList()
+            task.wait(CONFIG.StepDelay)
+        end
+
+        setLocked(false)
+        refreshAll()
+
+        local msg = string.format("Xong: %d thành công, %d lỗi / %d.", success, failed, total)
+        if #errors > 0 then
+            msg = msg .. " " .. errors[1]
+            if CONFIG.StopOnError then
+                msg = msg .. " (đã dừng)"
+            end
+        end
+        notify(msg, failed > 0 and C.yellow or C.green)
+    end)
+end)
+
+----------------------------------------------------------------
+-- SELECT BLOCK
+----------------------------------------------------------------
+local alive = true
+gui.Destroying:Connect(function() alive = false end)
+
+local selBlock = nil     -- Block đang xem thông tin (block được chọn gần nhất)
+local selectedBlocks = {} -- Danh sách nhiều BasePart được chọn
+local blockHighlights = {} -- Highlight vàng theo từng BasePart
+local highlightsVisible = true
+local picking = false    -- chế độ chạm chọn từng Part
+local dragSelectMode = false
+local dragSelecting = false
+local holdTriggered = false
+local dragAddMode = true
+local dragStart = Vector2.new(0, 0)
+local dragRect
+local spinning = true    -- Viewportframe đang xoay
+local showView = true    -- Viewportframe đang hiển thị
+local spinAngle = 0
+local vpClone, vpCenter, vpDist
+
+local selBody = selectWin.body
+
+-- Bên trái: Viewportframe
+local viewBox = mk("Frame", {
+    Name = "ViewBox", BackgroundColor3 = C.navy, BorderSizePixel = 0,
+    Position = UDim2.new(0, 6, 0, 6), Size = UDim2.new(0.46, -9, 1, -12), ClipsDescendants = true,
+}, selBody)
+local viewHint = mk("TextLabel", {
+    BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Text = "Viewportframe",
+    Font = Enum.Font.Arial, TextScaled = true, TextColor3 = C.text,
+}, viewBox)
+mk("UITextSizeConstraint", { MaxTextSize = 26, MinTextSize = 8 }, viewHint)
+local viewport = mk("ViewportFrame", {
+    BackgroundTransparency = 1, Size = UDim2.new(1, 0, 1, 0), Visible = false,
+    Ambient = Color3.fromRGB(170, 170, 170), LightColor = Color3.fromRGB(255, 255, 255),
+}, viewBox)
+local cam = mk("Camera", { FieldOfView = 60 }, viewport)
+viewport.CurrentCamera = cam
+
+-- Bên phải: nút điều khiển + CFrame + Size
+local right = mk("ScrollingFrame", {
+    Name = "Right", BackgroundColor3 = C.navy, BorderSizePixel = 0,
+    Position = UDim2.new(0.46, 3, 0, 6), Size = UDim2.new(0.54, -9, 1, -12),
+    ScrollBarThickness = 3, ScrollingDirection = Enum.ScrollingDirection.Y,
+    CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, selBody)
+mk("UIPadding", {
+    PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 6),
+    PaddingTop = UDim.new(0, 5), PaddingBottom = UDim.new(0, 5),
+}, right)
+mk("UIListLayout", { Padding = UDim.new(0, 3), SortOrder = Enum.SortOrder.LayoutOrder }, right)
+
+local function selRow(order, height)
+    return mk("Frame", { LayoutOrder = order, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, height) }, right)
+end
+local function selLabel(order, text)
+    mk("TextLabel", {
+        LayoutOrder = order, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 18),
+        Text = text, Font = Enum.Font.Arial, TextSize = 16, TextColor3 = C.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, right)
+end
+local function selButton(parent, text, x, w, maxSize)
+    local b = mk("TextButton", {
+        Position = UDim2.new(x, x == 0 and 0 or 2, 0, 0), Size = UDim2.new(w, -2, 1, 0),
+        BackgroundColor3 = C.peri, TextColor3 = C.ink, Text = text, BorderSizePixel = 0,
+        Font = Enum.Font.Arial, TextScaled = true, TextWrapped = true,
+    }, parent)
+    mk("UITextSizeConstraint", { MaxTextSize = maxSize, MinTextSize = 7 }, b)
+    mk("UIPadding", { PaddingLeft = UDim.new(0, 2), PaddingRight = UDim.new(0, 2) }, b)
+    return b
+end
+local function infoBox(parent, placeholder)
+    local box = mk("TextBox", {
+        Size = UDim2.new(1, -46, 1, 0), BackgroundColor3 = C.box, BorderSizePixel = 0,
+        TextColor3 = C.ink, PlaceholderText = placeholder, PlaceholderColor3 = C.hint,
+        Text = "", ClearTextOnFocus = false, TextEditable = false, Font = Enum.Font.Arial,
+        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+    }, parent)
+    mk("UIPadding", { PaddingLeft = UDim.new(0, 3) }, box)
+    local copyB = mk("TextButton", {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.new(0, 42, 1, 0),
+        BackgroundColor3 = C.peri, TextColor3 = C.ink, Text = "Copy",
+        Font = Enum.Font.Arial, TextSize = 12, BorderSizePixel = 0,
+    }, parent)
+    copyB.Activated:Connect(function()
+        if box.Text == "" then
+            notify("Chưa có dữ liệu để copy.", C.yellow)
+        elseif copyText(box.Text) then
+            notify("Đã copy.", C.green)
+        else
+            notify("Không có setclipboard, đã in ra Output.", C.yellow)
+        end
+    end)
+    return box
+end
+
+local row1 = selRow(1, 36)
+local spinBtn = selButton(row1, "Xoay", 0, 1/3, 12)
+local showBtn = selButton(row1, "Viewport", 1/3, 1/3, 12)
+local hideHighlightsBtn = selButton(row1, "Ẩn Highlight", 2/3, 1/3, 11)
+
+-- Nhãn đặt theo đúng nội dung: ô trên là CFrame (12 số), ô dưới là Size (3 số)
+selLabel(2, "CFrame")
+local cfBox = infoBox(selRow(3, 24), "X,Y,Z,0,0,0,0,0,0,0,0,0")
+selLabel(4, "Size")
+local sizeBox = infoBox(selRow(5, 24), "X,Y,Z (Size)")
+
+local row6 = selRow(6, 34)
+local pickBtn = selButton(row6, "Chọn nhiều Part", 0, 0.5, 12)
+local unpickBtn = selButton(row6, "Bỏ chọn tất cả", 0.5, 0.5, 18)
+local row7 = selRow(7, 34)
+local applySelectedBtn = selButton(row7, "Apply", 0, 1, 18)
+local multiCountLabel = mk("TextLabel", {
+    LayoutOrder = 8, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 18),
+    Text = "Đã chọn: 0 Part", Font = Enum.Font.Arial, TextSize = 13, TextColor3 = C.yellow,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, right)
+
+-- Select Block chỉ thao tác với BasePart thật; tuyệt đối không lấy CFrame/Size của Model.
+local function blockInfo(part)
+    if not part or not part:IsA("BasePart") or not part.Parent then return nil end
+    return part.CFrame, part.Size
+end
+
+local function refreshInfo()
+    if selBlock and selBlock.Parent then
+        local cf, size = blockInfo(selBlock)
+        if cf then
+            cfBox.Text = textCFFull(cf)
+            sizeBox.Text = textVec(size)
+            return
+        end
+    end
+    cfBox.Text = ""
+    sizeBox.Text = ""
+end
+
+local function updateCam()
+    if not vpClone then return end
+    local pos = vpCenter + Vector3.new(math.sin(spinAngle) * vpDist, vpDist * 0.35, math.cos(spinAngle) * vpDist)
+    cam.CFrame = CFrame.lookAt(pos, vpCenter)
+end
+
+local function clearView()
+    if vpClone then
+        vpClone:Destroy()
+        vpClone = nil
+    end
+    viewport.Visible = false
+    viewHint.Visible = true
+end
+
+local function buildView()
+    clearView()
+    if not selBlock or not showView then return end
+
+    local function tryClone()
+        local ok, c = pcall(function() return selBlock:Clone() end)
+        if ok then return c end
+        return nil
+    end
+    local clone = tryClone()
+    if not clone then
+        -- Block không cho Clone: bật Archivable cục bộ rồi thử lại
+        pcall(function()
+            selBlock.Archivable = true
+            for _, d in ipairs(selBlock:GetDescendants()) do
+                d.Archivable = true
+            end
+        end)
+        clone = tryClone()
+    end
+    if not clone then return end
+
+    for _, d in ipairs(clone:GetDescendants()) do
+        if d:IsA("LuaSourceContainer") then d:Destroy() end
+    end
+
+    local wrap = Instance.new("Model")
+    clone.Parent = wrap
+    wrap.Parent = viewport
+    local ok, cf, size = pcall(function() return wrap:GetBoundingBox() end)
+    if not ok or not cf then
+        wrap:Destroy()
+        return
+    end
+
+    vpClone = wrap
+    vpCenter = cf.Position
+    vpDist = size.Magnitude * 0.95 + 0.5
+    viewHint.Visible = false
+    viewport.Visible = true
+    updateCam()
+end
+
+local function isBlockSelected(block)
+    for _, item in ipairs(selectedBlocks) do
+        if item == block then return true end
+    end
+    return false
+end
+
+local function updateHighlightVisibility()
+    for block, highlight in pairs(blockHighlights) do
+        if not block or not block.Parent then
+            if highlight then highlight:Destroy() end
+            blockHighlights[block] = nil
+        else
+            highlight.Enabled = highlightsVisible
+        end
+    end
+    hideHighlightsBtn.Text = highlightsVisible and "Ẩn HL" or "Hiện HL"
+    hideHighlightsBtn.BackgroundColor3 = highlightsVisible and C.peri or C.yellow
+    hideHighlightsBtn.TextColor3 = C.ink
+end
+
+local function refreshMultiCount()
+    local count = 0
+    for i = #selectedBlocks, 1, -1 do
+        local part = selectedBlocks[i]
+        if not part or not part:IsA("BasePart") or not part.Parent then
+            table.remove(selectedBlocks, i)
+        else
+            count += 1
+        end
+    end
+    multiCountLabel.Text = "Đã chọn: " .. count .. " Part"
+end
+
+local function addBlockSelection(block)
+    -- Phòng vệ ở đầu hàm: không cho Model hoặc instance khác lọt vào selection.
+    if not block or not block:IsA("BasePart") or not block.Parent then return end
+    if not isBlockSelected(block) then
+        selectedBlocks[#selectedBlocks + 1] = block
+        if block:IsA("BasePart") then
+            local h = Instance.new("Highlight")
+            h.Name = "ArraySelectedBlockHighlight"
+            h.Adornee = block
+            h.FillColor = Color3.fromRGB(255, 220, 0)
+            h.OutlineColor = Color3.fromRGB(255, 245, 130)
+            h.FillTransparency = 0.55
+            h.OutlineTransparency = 0
+            h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            h.Enabled = highlightsVisible
+            h.Parent = workspace
+            blockHighlights[block] = h
+        end
+    end
+    selBlock = block
+    refreshMultiCount()
+    updateHighlightVisibility()
+    refreshInfo()
+    buildView()
+end
+
+local function removeBlockSelection(block)
+    for i = #selectedBlocks, 1, -1 do
+        if selectedBlocks[i] == block then
+            table.remove(selectedBlocks, i)
+            break
+        end
+    end
+    local highlight = blockHighlights[block]
+    if highlight then highlight:Destroy() end
+    blockHighlights[block] = nil
+    if selBlock == block then
+        selBlock = selectedBlocks[#selectedBlocks]
+    end
+    refreshMultiCount()
+    refreshInfo()
+    buildView()
+end
+
+local function clearBlockSelections()
+    table.clear(selectedBlocks)
+    for block, highlight in pairs(blockHighlights) do
+        if highlight then highlight:Destroy() end
+        blockHighlights[block] = nil
+    end
+    selBlock = nil
+    refreshMultiCount()
+    refreshInfo()
+    buildView()
+end
+
+local function setSelection(block)
+    if block then
+        addBlockSelection(block)
+    else
+        selBlock = nil
+        refreshInfo()
+        buildView()
+    end
+end
+
+local function setPicking(on)
+    picking = on
+    pickBtn.Text = on and "Đang chọn (chạm)" or "Select"
+    pickBtn.BackgroundColor3 = on and C.yellow or C.peri
+end
+
+local bindDragSelect
+local function setDragSelectMode(on)
+    dragSelectMode = on
+    if on then
+        picking = true
+        pickBtn.Text = "Kéo vùng chọn"
+        pickBtn.BackgroundColor3 = C.yellow
+        bindDragSelect()
+    else
+        pickBtn.Text = picking and "Đang chọn (chạm)" or "Select"
+        pickBtn.BackgroundColor3 = picking and C.yellow or C.peri
+        dragSelecting = false
+        if dragRect then dragRect.Visible = false end
+        ContextActionService:UnbindAction("BlockArray_DragSelect")
+    end
+end
+
+-- Chỉ nhận chính BasePart bị chạm, KHÔNG đổi thành Model cha.
+-- Giữ tên Part/ColorPart để không chọn nhầm địa hình hoặc vật thể GUI khác trong Workspace.
+local function findSelectablePart(inst)
+    if not inst or not inst:IsA("BasePart") then return nil end
+    if inst.Name ~= "Part" and inst.Name ~= "ColorPart" then return nil end
+    return inst
+end
+
+local pickConn = UserInputService.InputBegan:Connect(function(input, processed)
+    if processed or not picking or dragSelectMode or dragSelecting or not selectWin.frame.Visible then return end
+    if not isPress(input) then return end
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+
+    local ray = camera:ScreenPointToRay(input.Position.X, input.Position.Y)
+    local params = RaycastParams.new()
+    local char = Players.LocalPlayer and Players.LocalPlayer.Character
+    if char then
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances = { char }
+    end
+    local res = workspace:Raycast(ray.Origin, ray.Direction * 2000, params)
+    if not res then
+        notify("Không chạm trúng Part nào.", C.yellow)
+        return
+    end
+    local block = findSelectablePart(res.Instance)
+    if not block then
+        notify("Vật thể này không phải Part có tên Part/ColorPart.", C.yellow)
+        return
+    end
+    addBlockSelection(block)
+    notify("Đã chọn Part: " .. block.Name, C.green)
+end)
+
+-- Xoay Viewportframe
+local spinConn = RunService.RenderStepped:Connect(function(dt)
+    if spinning and vpClone and selectWin.frame.Visible then
+        spinAngle = spinAngle + dt * 1.2
+        updateCam()
+    end
+end)
+gui.Destroying:Connect(function()
+    pickConn:Disconnect()
+    spinConn:Disconnect()
+    ContextActionService:UnbindAction("BlockArray_DragSelect")
+    for _, highlight in pairs(blockHighlights) do
+        if highlight then highlight:Destroy() end
+    end
+end)
+
+-- Chạm nhanh nút Select = bật/tắt chạm chọn; giữ nút 0,5 giây = bật/tắt kéo khung chọn như V49.
+pickBtn.InputBegan:Connect(function(input)
+    if not isPress(input) then return end
+    local held = true
+    holdTriggered = false
+    input.Changed:Connect(function()
+        if input.UserInputState == Enum.UserInputState.End or input.UserInputState == Enum.UserInputState.Cancel then
+            held = false
+        end
+    end)
+    task.delay(0.5, function()
+        if held and selectWin.frame.Visible then
+            holdTriggered = true
+            setDragSelectMode(not dragSelectMode)
+            notify(dragSelectMode and "Kéo để tạo vùng chọn; giữ nút Select lần nữa để thoát." or "Đã tắt kéo vùng chọn.", C.green)
+        end
+    end)
+end)
+
+pickBtn.Activated:Connect(function()
+    if holdTriggered then holdTriggered = false; return end
+    if dragSelectMode then
+        setDragSelectMode(false)
+        setPicking(true)
+        notify("Đã về chế độ chạm chọn.", C.green)
+    else
+        setPicking(not picking)
+        notify(picking and "Chạm lần lượt vào Block để chọn." or "Đã tắt chế độ chọn.", C.green)
+    end
+end)
+
+-- Khung chọn hình chữ nhật và thao tác kéo tương tự Select giữ nút trong V49.
+dragRect = mk("Frame", {
+    Name = "ArrayDragSelectRect", BackgroundColor3 = Color3.fromRGB(0, 0, 0),
+    BackgroundTransparency = 0.62, BorderSizePixel = 1,
+    BorderColor3 = Color3.fromRGB(255, 220, 0), Visible = false,
+    Active = false, ZIndex = 9999,
+}, gui)
+
+local lastDragPos = Vector2.new(0, 0)
+local function updateDragRect(pos)
+    lastDragPos = pos
+    local x1, y1 = math.min(dragStart.X, pos.X), math.min(dragStart.Y, pos.Y)
+    dragRect.Position = UDim2.fromOffset(x1, y1)
+    dragRect.Size = UDim2.fromOffset(math.abs(pos.X - dragStart.X), math.abs(pos.Y - dragStart.Y))
+    dragRect.Visible = true
+end
+
+-- Gom các BasePart được hỗ trợ trên Workspace; không thêm Model cha/container vào danh sách.
+local function collectAllBlocks()
+    local found = {}
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("BasePart") and (d.Name == "Part" or d.Name == "ColorPart") then
+            found[#found + 1] = d
+        end
+    end
+    return found
+end
+
+local function getBlocksInRect(x1, y1, x2, y2)
+    local out = {}
+    local camera = workspace.CurrentCamera
+    if not camera then return out end
+    for _, block in ipairs(collectAllBlocks()) do
+        local cf, size = blockInfo(block)
+        if cf and size then
+            local half = size / 2
+            local bx1, by1, bx2, by2 = math.huge, math.huge, -math.huge, -math.huge
+            local front = false
+            for _, sx in ipairs({-1, 1}) do
+                for _, sy in ipairs({-1, 1}) do
+                    for _, sz in ipairs({-1, 1}) do
+                        local point = camera:WorldToScreenPoint(cf * Vector3.new(sx * half.X, sy * half.Y, sz * half.Z))
+                        if point.Z > 0 then
+                            front = true
+                            bx1, bx2 = math.min(bx1, point.X), math.max(bx2, point.X)
+                            by1, by2 = math.min(by1, point.Y), math.max(by2, point.Y)
+                        end
+                    end
+                end
+            end
+            if front then
+                local overlapX = math.min(bx2, x2) - math.max(bx1, x1)
+                local overlapY = math.min(by2, y2) - math.max(by1, y1)
+                local center = camera:WorldToScreenPoint(cf.Position)
+                local centerInside = center.Z > 0 and center.X >= x1 and center.X <= x2 and center.Y >= y1 and center.Y <= y2
+                local area = math.max((bx2 - bx1) * (by2 - by1), 1)
+                if centerInside or (overlapX > 0 and overlapY > 0 and overlapX * overlapY / area >= 0.35) then
+                    out[#out + 1] = block
+                end
+            end
+        end
+    end
+    return out
+end
+
+local function dragSelectAction(_, state, input)
+    local pos = Vector2.new(input.Position.X, input.Position.Y)
+    if input.UserInputType == Enum.UserInputType.MouseMovement then
+        if dragSelecting then updateDragRect(pos); return Enum.ContextActionResult.Sink end
+        return Enum.ContextActionResult.Pass
+    end
+    if state == Enum.UserInputState.Begin then
+        dragSelecting = true
+        dragStart = pos
+        local camera = workspace.CurrentCamera
+        local ray = camera and camera:ScreenPointToRay(pos.X, pos.Y)
+        local result = ray and workspace:Raycast(ray.Origin, ray.Direction * 2000)
+        local firstBlock = result and findSelectablePart(result.Instance)
+        dragAddMode = not (firstBlock and isBlockSelected(firstBlock))
+        updateDragRect(pos)
+    elseif state == Enum.UserInputState.Change then
+        if dragSelecting then updateDragRect(pos) end
+    else
+        if dragSelecting then
+            pos = lastDragPos
+            dragSelecting = false
+            dragRect.Visible = false
+            local x1, y1 = math.min(dragStart.X, pos.X), math.min(dragStart.Y, pos.Y)
+            local x2, y2 = math.max(dragStart.X, pos.X), math.max(dragStart.Y, pos.Y)
+            local hits
+            if x2 - x1 < 8 and y2 - y1 < 8 then
+                local camera = workspace.CurrentCamera
+                local ray = camera and camera:ScreenPointToRay(pos.X, pos.Y)
+                local result = ray and workspace:Raycast(ray.Origin, ray.Direction * 2000)
+                hits = result and {findSelectablePart(result.Instance)} or {}
+            else
+                hits = getBlocksInRect(x1, y1, x2, y2)
+            end
+            local before = #selectedBlocks
+            for _, block in ipairs(hits) do
+                if block then
+                    if dragAddMode then
+                        addBlockSelection(block)
+                    else
+                        removeBlockSelection(block)
+                    end
+                end
+            end
+            local delta = math.abs(#selectedBlocks - before)
+            notify((dragAddMode and "Đã thêm chọn " or "Đã bỏ chọn ") .. delta .. " Part.", C.green)
+        end
+    end
+    return Enum.ContextActionResult.Sink
+end
+
+bindDragSelect = function()
+    ContextActionService:BindActionAtPriority("BlockArray_DragSelect", dragSelectAction, false,
+        Enum.ContextActionPriority.High.Value, Enum.UserInputType.MouseButton1,
+        Enum.UserInputType.MouseMovement, Enum.UserInputType.Touch)
+end
+
+unpickBtn.Activated:Connect(function()
+    setPicking(false)
+    setDragSelectMode(false)
+    clearBlockSelections()
+end)
+
+applySelectedBtn.Activated:Connect(function()
+    if isRunning then
+        notify("Không thể Apply khi Array đang chạy.", C.yellow)
+        return
+    end
+    local added = 0
+    for _, block in ipairs(selectedBlocks) do
+        if block and block:IsA("BasePart") and block.Parent then
+            local cf, size = blockInfo(block)
+            if cf and size then
+                local item = newItem() -- PathBlock giữ mặc định; chỉ lấy Vector/Resize từ object
+                item.CF = cf
+                item.Resize = size
+                BlockArray[#BlockArray + 1] = item
+                added += 1
+            end
+        end
+    end
+    if added > 0 then
+        selected = BlockArray[#BlockArray - added + 1]
+        refreshAll()
+        setEditorText(buildText())
+        notify("Đã thêm " .. added .. " Value từ Part vào Array (Vector + Resize; Block mặc định).", C.green)
+    else
+        notify("Hãy chọn ít nhất một Block hợp lệ trước khi Apply.", C.yellow)
+    end
+end)
+
+hideHighlightsBtn.Activated:Connect(function()
+    highlightsVisible = not highlightsVisible
+    updateHighlightVisibility()
+end)
+
+spinBtn.Activated:Connect(function()
+    spinning = not spinning
+    spinBtn.Text = spinning and "Xoay" or "Dừng xoay"
+end)
+
+showBtn.Activated:Connect(function()
+    showView = not showView
+    showBtn.Text = showView and "Viewport" or "Ẩn View"
+    if showView then buildView() else clearView() end
+end)
+
+-- Mở cửa sổ mà chưa chọn gì thì tự vào chế độ chọn; đóng cửa sổ thì thoát chế độ chọn
+selectWin.frame:GetPropertyChangedSignal("Visible"):Connect(function()
+    if selectWin.frame.Visible then
+        if not selBlock then setPicking(true) end
+    else
+        setPicking(false)
+        setDragSelectMode(false)
+    end
+end)
+
+-- Cập nhật CFrame / Size theo Part đang chọn (Part có thể đã di chuyển hoặc bị xóa)
+task.spawn(function()
+    while alive do
+        task.wait(0.5)
+        refreshMultiCount()
+        updateHighlightVisibility()
+        if selBlock and selectWin.frame.Visible then
+            if not selBlock.Parent then
+                selBlock = selectedBlocks[#selectedBlocks]
+                refreshInfo()
+                buildView()
+                notify("Part đang xem đã bị xóa.", C.yellow)
+            else
+                refreshInfo()
+            end
+        end
+    end
+end)
+
+----------------------------------------------------------------
+-- CÀI ĐẶT (⚙)
+----------------------------------------------------------------
+local sList = mk("ScrollingFrame", {
+    BackgroundTransparency = 1, BorderSizePixel = 0, Size = UDim2.new(1, 0, 1, 0),
+    ScrollBarThickness = 4, ScrollingDirection = Enum.ScrollingDirection.Y,
+    CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+}, settingsWin.body)
+mk("UIPadding", {
+    PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 10),
+    PaddingTop = UDim.new(0, 8), PaddingBottom = UDim.new(0, 8),
+}, sList)
+mk("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, sList)
+
+local function setLabel(order, text)
+    mk("TextLabel", {
+        LayoutOrder = order, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 16),
+        Text = text, Font = Enum.Font.Arial, TextSize = 13, TextColor3 = C.text,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, sList)
+end
+local function setBox(order, initial)
+    local box = mk("TextBox", {
+        LayoutOrder = order, Size = UDim2.new(1, 0, 0, 28), BackgroundColor3 = C.box, BorderSizePixel = 0,
+        TextColor3 = C.ink, Text = initial, ClearTextOnFocus = false,
+        Font = Enum.Font.Arial, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left,
+    }, sList)
+    mk("UIPadding", { PaddingLeft = UDim.new(0, 6) }, box)
+    return box
+end
+
+local stopBtn = mk("TextButton", {
+    LayoutOrder = 1, Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.peri, TextColor3 = C.ink,
+    Font = Enum.Font.ArialBold, TextSize = 14, BorderSizePixel = 0, Text = "",
+}, sList)
+local function refreshStopBtn()
+    stopBtn.Text = "Dừng khi lỗi: " .. (CONFIG.StopOnError and "BẬT" or "TẮT")
+end
+refreshStopBtn()
+stopBtn.Activated:Connect(function()
+    CONFIG.StopOnError = not CONFIG.StopOnError
+    refreshStopBtn()
+    persistConfig()
+end)
+
+local searchToggle = mk("TextButton", {
+    LayoutOrder = 0, Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.peri, TextColor3 = C.ink,
+    Font = Enum.Font.ArialBold, TextSize = 14, BorderSizePixel = 0, Text = "",
+}, sList)
+local function refreshSearchToggle()
+    searchToggle.Text = "Ẩn thanh tìm kiếm: " .. (showSearch and "TẮT" or "BẬT")
+end
+searchToggle.Activated:Connect(function()
+    showSearch = not showSearch
+    if not showSearch then searchBox.Text = "" end
+    persistConfig()
+    applySearchVisibility()
+    refreshSearchToggle()
+    refreshList()
+end)
+refreshSearchToggle()
+
+local autoLoadBtn = mk("TextButton", {
+    LayoutOrder = 8, Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.peri, TextColor3 = C.ink,
+    Font = Enum.Font.ArialBold, TextSize = 14, BorderSizePixel = 0, Text = "",
+}, sList)
+local function refreshAutoLoadBtn()
+    autoLoadBtn.Text = "Auto Load Config: " .. (autoLoadConfig and "BẬT" or "TẮT")
+end
+refreshAutoLoadBtn()
+autoLoadBtn.Activated:Connect(function()
+    autoLoadConfig = not autoLoadConfig
+    refreshAutoLoadBtn()
+    persistConfig()
+    notify("Auto Load Config " .. (autoLoadConfig and "đã bật" or "đã tắt"), C.green)
+end)
+
+setLabel(2, "BuildContainer (nơi Block mới xuất hiện)")
+local containerBox = setBox(3, CONFIG.BuildContainer)
+containerBox.FocusLost:Connect(function()
+    local t = trim(containerBox.Text)
+    if t == "" then
+        containerBox.Text = CONFIG.BuildContainer
+    else
+        CONFIG.BuildContainer = t
+        persistConfig()
+        notify("Đã đổi BuildContainer: " .. t, C.green)
+    end
+end)
+
+setLabel(4, "Nghỉ giữa các bước (giây, 0 - 5)")
+local delayBox = setBox(5, tostring(CONFIG.StepDelay))
+delayBox.FocusLost:Connect(function()
+    local n = tonumber(delayBox.Text)
+    if n and n >= 0 and n <= 5 then
+        CONFIG.StepDelay = n
+        persistConfig()
+        notify("Đã đổi StepDelay: " .. n, C.green)
+    else
+        delayBox.Text = tostring(CONFIG.StepDelay)
+        notify("Giá trị phải từ 0 đến 5.", C.red)
+    end
+end)
+
+setLabel(6, "Số Block đặt cùng lúc (1 - 20)")
+local batchBox = setBox(7, tostring(CONFIG.BatchSize))
+batchBox.FocusLost:Connect(function()
+    local n = math.floor(tonumber(batchBox.Text) or 0)
+    if n >= 1 and n <= 20 then
+        CONFIG.BatchSize = n
+        persistConfig()
+        notify("Đã đặt " .. n .. " Block cùng lúc.", C.green)
+    else
+        batchBox.Text = tostring(CONFIG.BatchSize)
+        notify("Giá trị phải từ 1 đến 20.", C.red)
+    end
+end)
+
+----------------------------------------------------------------
+-- KHỞI ĐỘNG
+----------------------------------------------------------------
+-- Nếu Auto Load Config bật, nạp ArrayText đã lưu khi script khởi động.
+if autoLoadConfig and startupConfig and type(startupConfig.ArrayText) == "string" and startupConfig.ArrayText ~= "" then
+    local loadedItems, loadErr = parseArrayText(startupConfig.ArrayText)
+    if loadedItems then
+        BlockArray = loadedItems
+        selected = BlockArray[1]
+    else
+        warn("[ArrayPlacementTool] Auto Load Config lỗi: " .. tostring(loadErr))
+    end
+end
+loadBoxes()
+refreshAll()
+setEditorText(buildText())
+if startupConfig and type(startupConfig.ShowSearch) == "boolean" then
+    showSearch = startupConfig.ShowSearch
+    applySearchVisibility()
+    refreshSearchToggle()
+end
+persistConfig()
+if startupLoadingGui then pcall(function() startupLoadingGui:Destroy() end) end
+notify("Sẵn sàng. Nhập dữ liệu rồi bấm Execute.")
