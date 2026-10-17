@@ -1879,7 +1879,7 @@ execBtn.Activated:Connect(function()
     end)
 end)
 
-do -- SELECT BLOCK: bọc để các local không chiếm slot ở phạm vi chính
+local function initSelectBlock()
 ----------------------------------------------------------------
 -- SELECT BLOCK
 ----------------------------------------------------------------
@@ -2482,7 +2482,8 @@ task.spawn(function()
         end
     end
 end)
-end -- kết thúc SELECT BLOCK (giải phóng local để không vượt giới hạn 200)
+end
+initSelectBlock()
 
 ----------------------------------------------------------------
 -- CÀI ĐẶT (⚙)
