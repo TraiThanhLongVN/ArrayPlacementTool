@@ -80,17 +80,21 @@ pcall(function()
     box.AnchorPoint = Vector2.new(0.5, 0.5)
     box.Position = UDim2.fromScale(0.5, 0.5)
     box.Size = UDim2.fromOffset(280, 76)
-    box.BackgroundColor3 = Color3.fromRGB(20, 24, 42)
+    box.BackgroundColor3 = Color3.fromRGB(0, 0, 135) -- giống C.navy của tool
     box.BorderSizePixel = 0
     box.Parent = startupLoadingGui
-    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 10)
+    Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+    local stroke = Instance.new("UIStroke", box)
+    stroke.Color = Color3.fromRGB(150, 158, 255) -- giống C.peri
+    stroke.Thickness = 2
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
     local label = Instance.new("TextLabel")
     label.BackgroundTransparency = 1
     label.Size = UDim2.fromScale(1, 1)
-    label.Font = Enum.Font.GothamBold
+    label.Font = Enum.Font.ArialBold
     label.Text = "Array Placement Tool\nĐang khởi tạo..."
-    label.TextColor3 = Color3.new(1, 1, 1)
-    label.TextSize = 16
+    label.TextColor3 = Color3.fromRGB(255, 255, 255)
+    label.TextSize = 18
     label.Parent = box
 end)
 local startupConfig = nil
@@ -1761,6 +1765,7 @@ execBtn.Activated:Connect(function()
     end)
 end)
 
+do -- SELECT BLOCK: bọc để các local không chiếm slot ở phạm vi chính
 ----------------------------------------------------------------
 -- SELECT BLOCK
 ----------------------------------------------------------------
@@ -2363,6 +2368,7 @@ task.spawn(function()
         end
     end
 end)
+end -- kết thúc SELECT BLOCK (giải phóng local để không vượt giới hạn 200)
 
 ----------------------------------------------------------------
 -- CÀI ĐẶT (⚙)
