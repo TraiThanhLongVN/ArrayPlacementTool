@@ -1,6 +1,6 @@
 -- LOADING + CREATE FOLDER/FILES + LOAD REMOTE SCRIPT
 -- Thay LINK bằng URL raw của BlockArray script bạn muốn chạy.
-local SCRIPT_URL = "LINK"
+local SCRIPT_URL = "https://github.com/TraiThanhLongVN/ArrayPlacementTool/edit/main/Core"
 
 local ROOT_FOLDER = "ArrayPlacementTool"
 local DATA_FOLDER = ROOT_FOLDER .. "/Data"
