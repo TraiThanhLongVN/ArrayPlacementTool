@@ -1,11 +1,23 @@
 -- LOADING + CREATE FOLDER/FILES + LOAD REMOTE SCRIPT
--- Thay LINK bằng URL raw của script bạn muốn chạy.
-local SCRIPT_URL = "https://raw.githubusercontent.com/TraiThanhLongVN/ArrayPlacementTool/refs/heads/main/Core"
+-- Thay LINK bằng URL raw của BlockArray script bạn muốn chạy.
+local SCRIPT_URL = "LINK"
 
 local ROOT_FOLDER = "ArrayPlacementTool"
 local DATA_FOLDER = ROOT_FOLDER .. "/Data"
 local TOTAL_SLOTS = 5
-local DEFAULT_CONTENT = "Hello World"
+local DEFAULT_CONTENT = "This is Slot"
+
+-- Bảng màu giống BlockArray Tool
+local C = {
+    navy   = Color3.fromRGB(0, 0, 135),
+    navy2  = Color3.fromRGB(22, 22, 150),
+    peri   = Color3.fromRGB(150, 158, 255),
+    track  = Color3.fromRGB(0, 0, 105),
+    text   = Color3.fromRGB(255, 255, 255),
+    ink    = Color3.fromRGB(10, 10, 50),
+    red    = Color3.fromRGB(240, 80, 80),
+    green  = Color3.fromRGB(80, 220, 110),
+}
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -27,60 +39,75 @@ frame.Name = "Main"
 frame.AnchorPoint = Vector2.new(0.5, 0.5)
 frame.Position = UDim2.fromScale(0.5, 0.5)
 frame.Size = UDim2.fromOffset(320, 145)
-frame.BackgroundColor3 = Color3.fromRGB(24, 26, 34)
+frame.BackgroundColor3 = C.navy
 frame.BorderSizePixel = 0
 frame.Parent = gui
-Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 6)
 local stroke = Instance.new("UIStroke", frame)
-stroke.Color = Color3.fromRGB(75, 125, 255)
-stroke.Thickness = 1.5
+stroke.Color = C.peri
+stroke.Thickness = 2
+stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+-- Thanh tiêu đề giống BlockArray (nền peri, chữ ink)
+local titleBar = Instance.new("Frame")
+titleBar.Size = UDim2.new(1, 0, 0, 30)
+titleBar.BackgroundColor3 = C.peri
+titleBar.BorderSizePixel = 0
+titleBar.Parent = frame
+Instance.new("UICorner", titleBar).CornerRadius = UDim.new(0, 6)
+local titleFix = Instance.new("Frame")
+titleFix.Position = UDim2.new(0, 0, 1, -8)
+titleFix.Size = UDim2.new(1, 0, 0, 8)
+titleFix.BackgroundColor3 = C.peri
+titleFix.BorderSizePixel = 0
+titleFix.Parent = titleBar
 
 local title = Instance.new("TextLabel")
 title.BackgroundTransparency = 1
-title.Position = UDim2.fromOffset(18, 12)
-title.Size = UDim2.new(1, -36, 0, 28)
-title.Font = Enum.Font.GothamBold
+title.Position = UDim2.fromOffset(10, 0)
+title.Size = UDim2.new(1, -20, 1, 0)
+title.Font = Enum.Font.ArialBold
 title.Text = "ĐANG TẢI"
-title.TextColor3 = Color3.fromRGB(245, 247, 255)
-title.TextSize = 19
+title.TextColor3 = C.ink
+title.TextSize = 18
 title.TextXAlignment = Enum.TextXAlignment.Left
-title.Parent = frame
+title.Parent = titleBar
 
 local status = Instance.new("TextLabel")
 status.BackgroundTransparency = 1
-status.Position = UDim2.fromOffset(18, 45)
-status.Size = UDim2.new(1, -36, 0, 24)
-status.Font = Enum.Font.Gotham
+status.Position = UDim2.fromOffset(12, 40)
+status.Size = UDim2.new(1, -24, 0, 22)
+status.Font = Enum.Font.Arial
 status.Text = "Đang khởi tạo..."
-status.TextColor3 = Color3.fromRGB(190, 196, 212)
-status.TextSize = 12
+status.TextColor3 = C.text
+status.TextSize = 14
 status.TextXAlignment = Enum.TextXAlignment.Left
 status.TextTruncate = Enum.TextTruncate.AtEnd
 status.Parent = frame
 
 local barBack = Instance.new("Frame")
-barBack.Position = UDim2.fromOffset(18, 82)
-barBack.Size = UDim2.new(1, -36, 0, 10)
-barBack.BackgroundColor3 = Color3.fromRGB(48, 52, 66)
+barBack.Position = UDim2.fromOffset(12, 72)
+barBack.Size = UDim2.new(1, -24, 0, 10)
+barBack.BackgroundColor3 = C.track
 barBack.BorderSizePixel = 0
 barBack.Parent = frame
 Instance.new("UICorner", barBack).CornerRadius = UDim.new(1, 0)
 
 local bar = Instance.new("Frame")
 bar.Size = UDim2.fromScale(0, 1)
-bar.BackgroundColor3 = Color3.fromRGB(75, 125, 255)
+bar.BackgroundColor3 = C.peri
 bar.BorderSizePixel = 0
 bar.Parent = barBack
 Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
 
 local percent = Instance.new("TextLabel")
 percent.BackgroundTransparency = 1
-percent.Position = UDim2.fromOffset(18, 101)
-percent.Size = UDim2.new(1, -36, 0, 22)
-percent.Font = Enum.Font.GothamMedium
+percent.Position = UDim2.fromOffset(12, 90)
+percent.Size = UDim2.new(1, -24, 0, 22)
+percent.Font = Enum.Font.ArialBold
 percent.Text = "0%"
-percent.TextColor3 = Color3.fromRGB(245, 247, 255)
-percent.TextSize = 12
+percent.TextColor3 = C.text
+percent.TextSize = 14
 percent.TextXAlignment = Enum.TextXAlignment.Right
 percent.Parent = frame
 
@@ -98,8 +125,10 @@ local function finish(message, hasError)
     status.Text = message
     percent.Text = hasError and "!" or "100%"
     if hasError then
-        bar.BackgroundColor3 = Color3.fromRGB(235, 75, 75)
+        bar.BackgroundColor3 = C.red
+        bar.Size = UDim2.fromScale(1, 1)
     else
+        bar.BackgroundColor3 = C.green
         bar.Size = UDim2.fromScale(1, 1)
     end
     task.wait(2)
@@ -139,11 +168,15 @@ local ok, err = pcall(function()
 
     setProgress(92, "Đang tải script...")
     local source = game:HttpGet(SCRIPT_URL)
-    if type(source) ~= "string" or source == "" then error("Không tải được mã nguồn từ URL.") end
+    if type(source) ~= "string" or source == "" then
+        error("Không tải được mã nguồn từ URL.")
+    end
 
     setProgress(97, "Đang chạy script...")
     local chunk, compileError = loadstring(source)
-    if not chunk then error("Lỗi biên dịch script: " .. tostring(compileError)) end
+    if not chunk then
+        error("Lỗi biên dịch script: " .. tostring(compileError))
+    end
     chunk()
     setProgress(100, "Đã tạo file và chạy script.")
 end)
