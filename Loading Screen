@@ -1,0 +1,156 @@
+-- LOADING + CREATE FOLDER/FILES + LOAD REMOTE SCRIPT
+-- Thay LINK bằng URL raw của script bạn muốn chạy.
+local SCRIPT_URL = "LINK"
+
+local ROOT_FOLDER = "ArrayPlacementTool"
+local DATA_FOLDER = ROOT_FOLDER .. "/Data"
+local TOTAL_SLOTS = 5
+local DEFAULT_CONTENT = "Hello World"
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local oldGui = playerGui:FindFirstChild("ArrayPlacementLoading")
+if oldGui then oldGui:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "ArrayPlacementLoading"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.DisplayOrder = 999999
+gui.Parent = playerGui
+
+local frame = Instance.new("Frame")
+frame.Name = "Main"
+frame.AnchorPoint = Vector2.new(0.5, 0.5)
+frame.Position = UDim2.fromScale(0.5, 0.5)
+frame.Size = UDim2.fromOffset(320, 145)
+frame.BackgroundColor3 = Color3.fromRGB(24, 26, 34)
+frame.BorderSizePixel = 0
+frame.Parent = gui
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 12)
+local stroke = Instance.new("UIStroke", frame)
+stroke.Color = Color3.fromRGB(75, 125, 255)
+stroke.Thickness = 1.5
+
+local title = Instance.new("TextLabel")
+title.BackgroundTransparency = 1
+title.Position = UDim2.fromOffset(18, 12)
+title.Size = UDim2.new(1, -36, 0, 28)
+title.Font = Enum.Font.GothamBold
+title.Text = "ĐANG TẢI"
+title.TextColor3 = Color3.fromRGB(245, 247, 255)
+title.TextSize = 19
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = frame
+
+local status = Instance.new("TextLabel")
+status.BackgroundTransparency = 1
+status.Position = UDim2.fromOffset(18, 45)
+status.Size = UDim2.new(1, -36, 0, 24)
+status.Font = Enum.Font.Gotham
+status.Text = "Đang khởi tạo..."
+status.TextColor3 = Color3.fromRGB(190, 196, 212)
+status.TextSize = 12
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.TextTruncate = Enum.TextTruncate.AtEnd
+status.Parent = frame
+
+local barBack = Instance.new("Frame")
+barBack.Position = UDim2.fromOffset(18, 82)
+barBack.Size = UDim2.new(1, -36, 0, 10)
+barBack.BackgroundColor3 = Color3.fromRGB(48, 52, 66)
+barBack.BorderSizePixel = 0
+barBack.Parent = frame
+Instance.new("UICorner", barBack).CornerRadius = UDim.new(1, 0)
+
+local bar = Instance.new("Frame")
+bar.Size = UDim2.fromScale(0, 1)
+bar.BackgroundColor3 = Color3.fromRGB(75, 125, 255)
+bar.BorderSizePixel = 0
+bar.Parent = barBack
+Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
+
+local percent = Instance.new("TextLabel")
+percent.BackgroundTransparency = 1
+percent.Position = UDim2.fromOffset(18, 101)
+percent.Size = UDim2.new(1, -36, 0, 22)
+percent.Font = Enum.Font.GothamMedium
+percent.Text = "0%"
+percent.TextColor3 = Color3.fromRGB(245, 247, 255)
+percent.TextSize = 12
+percent.TextXAlignment = Enum.TextXAlignment.Right
+percent.Parent = frame
+
+local function setProgress(value, message)
+    value = math.clamp(value, 0, 100)
+    status.Text = message
+    percent.Text = tostring(math.floor(value)) .. "%"
+    TweenService:Create(bar, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Size = UDim2.fromScale(value / 100, 1)
+    }):Play()
+end
+
+local function finish(message, hasError)
+    title.Text = hasError and "CÓ LỖI" or "HOÀN TẤT"
+    status.Text = message
+    percent.Text = hasError and "!" or "100%"
+    if hasError then
+        bar.BackgroundColor3 = Color3.fromRGB(235, 75, 75)
+    else
+        bar.Size = UDim2.fromScale(1, 1)
+    end
+    task.wait(2)
+    if gui then gui:Destroy() end
+end
+
+local function createFolder(path)
+    if not isfolder(path) then makefolder(path) end
+end
+
+local function createFile(path, content)
+    if not isfile(path) then writefile(path, content) end
+end
+
+local ok, err = pcall(function()
+    setProgress(10, "Đang kiểm tra thư mục...")
+    createFolder(ROOT_FOLDER)
+
+    setProgress(25, "Đang tạo thư mục Data...")
+    createFolder(DATA_FOLDER)
+
+    setProgress(40, "Đang tạo Slot1.txt...")
+    createFile(ROOT_FOLDER .. "/Slot1.txt", "This is Slot1 file")
+
+    for i = 1, TOTAL_SLOTS do
+        setProgress(40 + (i / TOTAL_SLOTS) * 35, "Đang kiểm tra Slot" .. i .. ".txt...")
+        createFile(DATA_FOLDER .. "/Slot" .. i .. ".txt", DEFAULT_CONTENT .. i)
+    end
+
+    setProgress(80, "Đang tạo Data.txt...")
+    createFile(ROOT_FOLDER .. "/Data.txt", "")
+
+    setProgress(88, "Đang kiểm tra URL script...")
+    if not SCRIPT_URL or SCRIPT_URL == "" or SCRIPT_URL == "LINK" then
+        error('Bạn chưa thay "LINK" bằng URL raw của script.')
+    end
+
+    setProgress(92, "Đang tải script...")
+    local source = game:HttpGet(SCRIPT_URL)
+    if type(source) ~= "string" or source == "" then error("Không tải được mã nguồn từ URL.") end
+
+    setProgress(97, "Đang chạy script...")
+    local chunk, compileError = loadstring(source)
+    if not chunk then error("Lỗi biên dịch script: " .. tostring(compileError)) end
+    chunk()
+    setProgress(100, "Đã tạo file và chạy script.")
+end)
+
+if ok then
+    finish("Đã tạo folder/file và chạy script.", false)
+else
+    warn("[Loading] " .. tostring(err))
+    finish(tostring(err), true)
+end
