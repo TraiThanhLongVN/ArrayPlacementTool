@@ -877,7 +877,7 @@ local importBtn = toolButton("Import", 5)
 
 local textScroll = mk("ScrollingFrame", {
     Name = "Editor", BackgroundColor3 = C.box, BorderSizePixel = 0,
-    Position = UDim2.new(0, 6, 0, 36), Size = UDim2.new(1, -12, 1, -44),
+    Position = UDim2.new(0, 6, 0, 36), Size = UDim2.new(1, -12, 1, -78),
     ScrollBarThickness = 8, ScrollingDirection = Enum.ScrollingDirection.XY,
     CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.XY,
 }, pbody)
@@ -1006,18 +1006,99 @@ fileActionBtn.Activated:Connect(function()
     if fileMode == "import" then refreshFileList() end
 end)
 
--- Văn bản trong Panel tự đồng bộ với danh sách, trừ khi người dùng đang soạn dở
+-- Văn bản trong Panel tự đồng bộ với danh sách, trừ khi người dùng đang soạn dở.
+-- Ô TextBox của Roblox chỉ chứa tối đa 200000 ký tự, nên Array dài được chia thành nhiều phần.
+local EDITOR_PART_LIMIT = 190000
 local programmatic = false
 dirty = false
-setEditorText = function(t)
+local editorParts = { "" }
+local curPart = 1
+
+-- Cắt văn bản thành các đoạn <= EDITOR_PART_LIMIT, ưu tiên cắt ở cuối dòng.
+-- Nối lại các đoạn (table.concat) sẽ ra đúng văn bản gốc.
+local function splitEditorText(t)
+    local parts, pos = {}, 1
+    while #t - pos + 1 > EDITOR_PART_LIMIT do
+        local window = t:sub(pos, pos + EDITOR_PART_LIMIT - 1)
+        local lastNl = window:match(".*()\n")
+        local cut = lastNl or EDITOR_PART_LIMIT
+        parts[#parts + 1] = t:sub(pos, pos + cut - 1)
+        pos = pos + cut
+    end
+    parts[#parts + 1] = t:sub(pos)
+    return parts
+end
+
+-- Thanh chuyển phần ở cuối Panel: « Phần x / n »
+local pagerFrame = mk("Frame", {
+    BackgroundTransparency = 1, Position = UDim2.new(0, 6, 1, -36), Size = UDim2.new(1, -12, 0, 30),
+}, pbody)
+local prevPartBtn = mk("TextButton", {
+    Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(0, 44, 1, 0), BackgroundColor3 = C.peri,
+    TextColor3 = C.ink, Font = Enum.Font.ArialBold, TextSize = 18, BorderSizePixel = 0, Text = "«",
+}, pagerFrame)
+local nextPartBtn = mk("TextButton", {
+    AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.new(0, 44, 1, 0),
+    BackgroundColor3 = C.peri, TextColor3 = C.ink, Font = Enum.Font.ArialBold, TextSize = 18,
+    BorderSizePixel = 0, Text = "»",
+}, pagerFrame)
+local pageLabel = mk("TextLabel", {
+    BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 0),
+    Size = UDim2.new(0, 200, 1, 0), TextColor3 = C.text, Font = Enum.Font.Arial, TextSize = 14, Text = "",
+}, pagerFrame)
+
+local function updatePager()
+    local n = #editorParts
+    if n > 1 then
+        pageLabel.Text = "Phần " .. curPart .. " / " .. n
+    else
+        pageLabel.Text = "Một phần"
+    end
+    prevPartBtn.Visible = n > 1
+    nextPartBtn.Visible = n > 1
+end
+
+-- Lưu nội dung đang hiển thị vào đúng phần của nó
+local function saveCurrentPart()
+    editorParts[curPart] = editor.Text
+end
+
+local function showPart(index)
+    curPart = math.clamp(index, 1, #editorParts)
     programmatic = true
-    editor.Text = t
+    editor.Text = editorParts[curPart]
     programmatic = false
+    updatePager()
+end
+
+-- Toàn bộ văn bản Array (ghép mọi phần lại)
+local function fullEditorText()
+    saveCurrentPart()
+    return table.concat(editorParts)
+end
+
+prevPartBtn.Activated:Connect(function()
+    if curPart > 1 then
+        saveCurrentPart()
+        showPart(curPart - 1)
+    end
+end)
+nextPartBtn.Activated:Connect(function()
+    if curPart < #editorParts then
+        saveCurrentPart()
+        showPart(curPart + 1)
+    end
+end)
+
+setEditorText = function(t)
+    editorParts = splitEditorText(t)
+    showPart(curPart)
     dirty = false
 end
 editor:GetPropertyChangedSignal("Text"):Connect(function()
     if not programmatic then dirty = true end
 end)
+updatePager()
 local function syncPanel()
     if not dirty then
         setEditorText(buildText())
@@ -1312,7 +1393,7 @@ applyBtn.Activated:Connect(function()
         notify("Đang chạy, không thể Apply.", C.yellow)
         return
     end
-    local items, err = parseArrayText(editor.Text)
+    local items, err = parseArrayText(fullEditorText())
     if not items then
         notify("Apply lỗi: " .. tostring(err), C.red)
         return
@@ -1329,7 +1410,10 @@ applyBtn.Activated:Connect(function()
 end)
 
 clearBtn.Activated:Connect(function()
-    editor.Text = "" -- tính là người dùng đã sửa: không tự ghi đè nữa cho tới khi Apply
+    -- tính là người dùng đã sửa: không tự ghi đè nữa cho tới khi Apply
+    editorParts = { "" }
+    showPart(1)
+    dirty = true
 end)
 
 copyAllBtn.Activated:Connect(function()
@@ -1651,6 +1735,19 @@ local function placeBatch(batch)
     end
 end
 
+-- Kiểm tra các thành phần cần cho việc chạy. Trả về chuỗi lỗi nếu thiếu, nil nếu đủ.
+local function preflight()
+    local _, e1 = getRemote("PlaceBlock")
+    if e1 then return e1 end
+    local _, e2 = getRemote("CommitResize")
+    if e2 then return e2 end
+    local _, e3 = getRemote("CommitMove")
+    if e3 then return e3 end
+    local _, e4 = getContainer()
+    if e4 then return e4 end
+    return nil
+end
+
 execBtn.Activated:Connect(function()
     if isRunning then return end -- chặn chạy chồng lên nhau
     saveFromBoxes(true)
@@ -1662,6 +1759,12 @@ execBtn.Activated:Connect(function()
         return
     end
 
+    local missing = preflight()
+    if missing then
+        notify("Không thể chạy: " .. missing, C.red)
+        return
+    end
+
     setLocked(true)
     for _, it in ipairs(BlockArray) do
         it.Status = nil
@@ -1669,7 +1772,10 @@ execBtn.Activated:Connect(function()
     refreshList()
 
     task.spawn(function()
+        -- pcall đảm bảo luôn mở khóa nút Execute dù có lỗi bất ngờ giữa chừng
+        local runOk, runErr = pcall(function()
         local total = #BlockArray
+        local batchSize = math.max(1, math.floor(tonumber(CONFIG.BatchSize) or 1))
         local success, failed = 0, 0
         local errors = {}
 
@@ -1686,9 +1792,9 @@ execBtn.Activated:Connect(function()
         end
         local placed = {}
         local stop = false
-        for startIdx = 1, total, CONFIG.BatchSize do
+        for startIdx = 1, total, batchSize do
             local batch = {}
-            for i = startIdx, math.min(startIdx + CONFIG.BatchSize - 1, total) do
+            for i = startIdx, math.min(startIdx + batchSize - 1, total) do
                 batch[#batch + 1] = snapshot[i]
                 snapshot[i].Item.Status = "run"
             end
@@ -1714,9 +1820,9 @@ execBtn.Activated:Connect(function()
         end
 
         -- Bước 2: đưa Block về đích và đặt kích thước, theo đợt (các Block trong đợt chạy song song).
-        for startIdx = 1, #placed, CONFIG.BatchSize do
+        for startIdx = 1, #placed, batchSize do
             local batch = {}
-            for i = startIdx, math.min(startIdx + CONFIG.BatchSize - 1, #placed) do
+            for i = startIdx, math.min(startIdx + batchSize - 1, #placed) do
                 batch[#batch + 1] = placed[i]
             end
             execBtn.Text = string.format("Đang hoàn tất %d/%d", startIdx, #placed)
@@ -1762,6 +1868,14 @@ execBtn.Activated:Connect(function()
             end
         end
         notify(msg, failed > 0 and C.yellow or C.green)
+        end)
+
+        setLocked(false)
+        refreshAll()
+        if not runOk then
+            warn("[BlockArrayTool] Execute lỗi: " .. tostring(runErr))
+            notify("Execute lỗi: " .. tostring(runErr), C.red)
+        end
     end)
 end)
 
