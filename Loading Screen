@@ -1,13 +1,16 @@
+-- LOADING SCREEN: chuẩn bị thư mục, dọn file thừa rồi tải script Core
 local SCRIPT_URL = "https://raw.githubusercontent.com/TraiThanhLongVN/ArrayPlacementTool/refs/heads/main/Core"
 local ROOT_FOLDER = "ArrayPlacementTool"
-local DATA_FOLDER = ROOT_FOLDER .. "/Data"
-local TOTAL_SLOTS = 5
-local DEFAULT_CONTENT = "This is Slot"
+
+-- Các file/thư mục do bản loader cũ tạo ra, Core KHÔNG dùng:
+--   ArrayPlacementTool/Data/Slot1..5.txt, ArrayPlacementTool/Slot1.txt, ArrayPlacementTool/Data.txt
+-- Chỉ xóa khi nội dung vẫn là nội dung mẫu (không đụng dữ liệu của bạn).
+local OLD_DATA_FOLDER = ROOT_FOLDER .. "/Data"
+local OLD_SLOT_COUNT = 5
 
 -- Bảng màu giống BlockArray Tool
 local C = {
     navy   = Color3.fromRGB(0, 0, 135),
-    navy2  = Color3.fromRGB(22, 22, 150),
     peri   = Color3.fromRGB(150, 158, 255),
     track  = Color3.fromRGB(0, 0, 105),
     text   = Color3.fromRGB(255, 255, 255),
@@ -45,7 +48,6 @@ stroke.Color = C.peri
 stroke.Thickness = 2
 stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 
--- Thanh tiêu đề giống BlockArray (nền peri, chữ ink)
 local titleBar = Instance.new("Frame")
 titleBar.Size = UDim2.new(1, 0, 0, 30)
 titleBar.BackgroundColor3 = C.peri
@@ -121,65 +123,79 @@ local function finish(message, hasError)
     title.Text = hasError and "CÓ LỖI" or "HOÀN TẤT"
     status.Text = message
     percent.Text = hasError and "!" or "100%"
-    if hasError then
-        bar.BackgroundColor3 = C.red
-        bar.Size = UDim2.fromScale(1, 1)
-    else
-        bar.BackgroundColor3 = C.green
-        bar.Size = UDim2.fromScale(1, 1)
-    end
+    bar.BackgroundColor3 = hasError and C.red or C.green
+    bar.Size = UDim2.fromScale(1, 1)
     task.wait(2)
     if gui then gui:Destroy() end
 end
 
-local function createFolder(path)
-    if not isfolder(path) then makefolder(path) end
+----------------------------------------------------------------
+-- DỌN FILE / THƯ MỤC THỪA
+----------------------------------------------------------------
+local function readSafe(path)
+    local ok, content = pcall(readfile, path)
+    if ok and type(content) == "string" then return content end
+    return nil
 end
 
-local function createFile(path, content)
-    if not isfile(path) then writefile(path, content) end
+-- Xóa file nếu nội dung đúng là nội dung mẫu. Trả về true nếu đã xóa.
+local function dropIfPlaceholder(path, expected)
+    if not isfile(path) then return false end
+    if readSafe(path) ~= expected then return false end
+    return pcall(delfile, path)
+end
+
+local function cleanupUnused()
+    if typeof(delfile) ~= "function" then return 0 end
+    local removed = 0
+
+    if dropIfPlaceholder(ROOT_FOLDER .. "/Slot1.txt", "This is Slot1 file") then removed += 1 end
+    if dropIfPlaceholder(ROOT_FOLDER .. "/Data.txt", "") then removed += 1 end
+
+    if isfolder(OLD_DATA_FOLDER) then
+        for i = 1, OLD_SLOT_COUNT do
+            if dropIfPlaceholder(OLD_DATA_FOLDER .. "/Slot" .. i .. ".txt", "This is Slot" .. i) then
+                removed += 1
+            end
+        end
+        -- Chỉ xóa thư mục Data khi đã trống (không còn file nào của bạn)
+        local okList, left = pcall(listfiles, OLD_DATA_FOLDER)
+        if okList and type(left) == "table" and #left == 0 and typeof(delfolder) == "function" then
+            if pcall(delfolder, OLD_DATA_FOLDER) then removed += 1 end
+        end
+    end
+    return removed
 end
 
 local ok, err = pcall(function()
-    setProgress(10, "Đang kiểm tra thư mục...")
-    createFolder(ROOT_FOLDER)
+    setProgress(15, "Đang kiểm tra thư mục...")
+    if not isfolder(ROOT_FOLDER) then makefolder(ROOT_FOLDER) end
 
-    setProgress(25, "Đang tạo thư mục Data...")
-    createFolder(DATA_FOLDER)
+    setProgress(35, "Đang dọn file thừa...")
+    local removed = cleanupUnused()
 
-    setProgress(40, "Đang tạo Slot1.txt...")
-    createFile(ROOT_FOLDER .. "/Slot1.txt", "This is Slot1 file")
-
-    for i = 1, TOTAL_SLOTS do
-        setProgress(40 + (i / TOTAL_SLOTS) * 35, "Đang kiểm tra Slot" .. i .. ".txt...")
-        createFile(DATA_FOLDER .. "/Slot" .. i .. ".txt", DEFAULT_CONTENT .. i)
-    end
-
-    setProgress(80, "Đang tạo Data.txt...")
-    createFile(ROOT_FOLDER .. "/Data.txt", "")
-
-    setProgress(88, "Đang kiểm tra URL script...")
+    setProgress(60, "Đang kiểm tra URL script...")
     if not SCRIPT_URL or SCRIPT_URL == "" or SCRIPT_URL == "LINK" then
-        error('Bạn chưa thay "LINK" bằng URL raw của script.')
+        error('Bạn chưa đặt URL raw của script trong SCRIPT_URL.')
     end
 
-    setProgress(92, "Đang tải script...")
+    setProgress(75, "Đang tải script...")
     local source = game:HttpGet(SCRIPT_URL)
     if type(source) ~= "string" or source == "" then
         error("Không tải được mã nguồn từ URL.")
     end
 
-    setProgress(97, "Đang chạy script...")
+    setProgress(90, "Đang chạy script...")
     local chunk, compileError = loadstring(source)
     if not chunk then
         error("Lỗi biên dịch script: " .. tostring(compileError))
     end
     chunk()
-    setProgress(100, "Đã tạo file và chạy script.")
+    setProgress(100, removed > 0 and ("Đã dọn " .. removed .. " mục thừa và chạy script.") or "Đã chạy script.")
 end)
 
 if ok then
-    finish("Đã tạo folder/file và chạy script.", false)
+    finish("Đã tải xong, script đang chạy.", false)
 else
     warn("[Loading] " .. tostring(err))
     finish(tostring(err), true)
