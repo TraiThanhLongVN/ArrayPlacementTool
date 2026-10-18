@@ -28,10 +28,16 @@ local CONFIG = {
     ColorPartTimeout = 3,   -- giây chờ ColorPart xuất hiện
     SettleTime = 0.15,      -- thời gian chờ thêm để phát hiện nhiều Block cùng xuất hiện
     StepDelay = 0.1,        -- nghỉ giữa các đợt để tránh spam server
-    BatchSize = 5,          -- số Block đặt cùng lúc trong một đợt (1 = đặt từng cái)
+    BatchSize = 5,          -- số Block đặt cùng lúc trong một đợt (1 - 1000)
     StopOnError = true,     -- true: dừng khi một phần tử lỗi; false: bỏ qua và làm tiếp
     BlockColor = "Institutional white",
     BlockMaterial = Enum.Material.SmoothPlastic,
+    PartLimit = 150000,     -- số ký tự tối đa mỗi phần trong Array Editor (TextBox của Roblox giới hạn 200000)
+    StageGap = 10,          -- khoảng cách giữa các Block đặt tạm (STAGE_GAP)
+    StageHeight = 60,       -- độ cao đặt tạm phía trên (STAGE_HEIGHT)
+    AutoLoadResizeGui = false, -- true: tự áp dụng kích thước GUI đã lưu khi khởi động script
+    LastArrayFile = "",     -- file Array dùng gần nhất (Auto Load Config sẽ nạp lại file này)
+    UISizes = {},           -- kích thước các cửa sổ: { TênCửaSổ = { Rộng, Cao } }
 }
 
 local DEFAULT_PATH = "ReplicatedStorage.Blocks.Basic.Block.Block"
@@ -104,14 +110,24 @@ pcall(function()
     if isfile(CONFIG_FILE) then
         startupConfig = HttpService:JSONDecode(readfile(CONFIG_FILE))
     else
-        local initial = { AutoLoadConfig = false, BuildContainer = "workspace.BuildModel", StepDelay = 0.1, BatchSize = 5, StopOnError = true, ShowSearch = true, ArrayText = "" }
+        local initial = { AutoLoadConfig = false, BuildContainer = "workspace.BuildModel", StepDelay = 0.1, BatchSize = 5, StopOnError = true, ShowSearch = true, StageGap = 10, StageHeight = 60, AutoLoadResizeGui = false, LastArrayFile = "", UISizes = {} }
         writefile(CONFIG_FILE, HttpService:JSONEncode(initial))
         startupConfig = initial
     end
 end)
+local uiSizeGetters = {} -- makeWindow đăng ký hàm lấy kích thước hiện tại của từng cửa sổ
 local function persistConfig(extra)
     pcall(function()
         if not isfolder(ROOT_FOLDER) then makefolder(ROOT_FOLDER) end
+        -- Kích thước GUI: giữ giá trị cũ, ghi đè bằng kích thước hiện tại của các cửa sổ đã tạo
+        local sizes = {}
+        for k, v in pairs(CONFIG.UISizes) do sizes[k] = v end
+        for name, getter in pairs(uiSizeGetters) do
+            local okG, w, h = pcall(getter)
+            if okG and w and h then sizes[name] = { w, h } end
+        end
+        CONFIG.UISizes = sizes
+        -- KHÔNG lưu nội dung BlockArray vào Config (làm Config rất nặng). Dùng Export/Import để lưu Array.
         local data = {
             AutoLoadConfig = autoLoadConfig == true,
             BuildContainer = CONFIG.BuildContainer,
@@ -119,7 +135,11 @@ local function persistConfig(extra)
             BatchSize = CONFIG.BatchSize,
             StopOnError = CONFIG.StopOnError,
             ShowSearch = showSearch,
-            ArrayText = buildText and buildText() or "",
+            StageGap = CONFIG.StageGap,
+            StageHeight = CONFIG.StageHeight,
+            AutoLoadResizeGui = CONFIG.AutoLoadResizeGui == true,
+            LastArrayFile = CONFIG.LastArrayFile or "",
+            UISizes = sizes,
         }
         if extra then for k, v in pairs(extra) do data[k] = v end end
         writefile(CONFIG_FILE, HttpService:JSONEncode(data))
@@ -146,7 +166,18 @@ autoLoadConfig = startupConfig and startupConfig.AutoLoadConfig == true or false
 if startupConfig then
     if type(startupConfig.BuildContainer) == "string" then CONFIG.BuildContainer = startupConfig.BuildContainer end
     if tonumber(startupConfig.StepDelay) then CONFIG.StepDelay = math.clamp(tonumber(startupConfig.StepDelay), 0, 5) end
-    if tonumber(startupConfig.BatchSize) then CONFIG.BatchSize = math.clamp(math.floor(tonumber(startupConfig.BatchSize)), 1, 20) end
+    if tonumber(startupConfig.BatchSize) then CONFIG.BatchSize = math.clamp(math.floor(tonumber(startupConfig.BatchSize)), 1, 1000) end
+    if tonumber(startupConfig.StageGap) then CONFIG.StageGap = math.clamp(tonumber(startupConfig.StageGap), 0, 1000) end
+    if tonumber(startupConfig.StageHeight) then CONFIG.StageHeight = math.clamp(tonumber(startupConfig.StageHeight), 0, 5000) end
+    if type(startupConfig.AutoLoadResizeGui) == "boolean" then CONFIG.AutoLoadResizeGui = startupConfig.AutoLoadResizeGui end
+    if type(startupConfig.LastArrayFile) == "string" then CONFIG.LastArrayFile = startupConfig.LastArrayFile end
+    if type(startupConfig.UISizes) == "table" then
+        for name, v in pairs(startupConfig.UISizes) do
+            if type(name) == "string" and type(v) == "table" and tonumber(v[1]) and tonumber(v[2]) then
+                CONFIG.UISizes[name] = { tonumber(v[1]), tonumber(v[2]) }
+            end
+        end
+    end
     if type(startupConfig.StopOnError) == "boolean" then CONFIG.StopOnError = startupConfig.StopOnError end
 end
 
@@ -542,12 +573,26 @@ local function makeResizable(handle, frame, minW, minH)
                 0, math.max(minW, startSize.X + d.X),
                 0, math.max(minH, startSize.Y + d.Y)
             )
+        end, function()
+            persistConfig() -- lưu Value Resize UI vào Config khi thả tay
         end)
     end)
 end
 
 -- Tạo cửa sổ có thanh tiêu đề, nút — (ẩn bớt), X (ẩn GUI) và ◢ (đổi kích thước)
 local function makeWindow(name, title, pos, size, minW, minH, titleBg, titleFg)
+    -- Tự động load Resize GUI: dùng kích thước đã lưu trong Config (giới hạn trong màn hình)
+    if CONFIG.AutoLoadResizeGui then
+        local sv = CONFIG.UISizes[name]
+        if sv then
+            local cam = workspace.CurrentCamera
+            local vs = cam and cam.ViewportSize or Vector2.new(1920, 1080)
+            size = UDim2.new(
+                0, math.clamp(sv[1], minW, math.max(minW, vs.X - 10)),
+                0, math.clamp(sv[2], minH, math.max(minH, vs.Y - 10))
+            )
+        end
+    end
     local frame = mk("Frame", {
         Name = name, Position = pos, Size = size,
         BackgroundColor3 = C.navy, BorderSizePixel = 0,
@@ -598,6 +643,10 @@ local function makeWindow(name, title, pos, size, minW, minH, titleBg, titleFg)
     makeResizable(handle, frame, minW, minH)
 
     local minimized, savedSize = false, nil
+    uiSizeGetters[name] = function()
+        local sz = (minimized and savedSize) or frame.Size
+        return math.floor(sz.X.Offset + 0.5), math.floor(sz.Y.Offset + 0.5)
+    end
     minBtn.Activated:Connect(function()
         minimized = not minimized
         if minimized then
@@ -877,11 +926,43 @@ local importBtn = toolButton("Import", 5)
 
 local textScroll = mk("ScrollingFrame", {
     Name = "Editor", BackgroundColor3 = C.box, BorderSizePixel = 0,
-    Position = UDim2.new(0, 6, 0, 36), Size = UDim2.new(1, -12, 1, -78),
+    Position = UDim2.new(0, 6, 0, 36), Size = UDim2.new(1, -12, 1, -44),
     ScrollBarThickness = 8, ScrollingDirection = Enum.ScrollingDirection.XY,
     CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.XY,
 }, pbody)
 mk("UICorner", { CornerRadius = UDim.new(0, 5) }, textScroll)
+
+-- Thanh chuyển phần: chỉ hiện khi Array quá dài và bị cắt thành nhiều phần
+local panelState = { page = 1, total = 1, from = 1, to = 0 }
+local pageBar = mk("Frame", {
+    BackgroundTransparency = 1, Position = UDim2.new(0, 6, 0, 34),
+    Size = UDim2.new(1, -12, 0, 24), Visible = false,
+}, pbody)
+local pagePrev = mk("TextButton", {
+    Size = UDim2.new(0, 44, 1, 0), BackgroundColor3 = C.peri, TextColor3 = C.ink,
+    Text = "◀", Font = Enum.Font.ArialBold, TextSize = 16, BorderSizePixel = 0,
+}, pageBar)
+mk("UICorner", { CornerRadius = UDim.new(0, 4) }, pagePrev)
+local pageNext = mk("TextButton", {
+    AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0),
+    Size = UDim2.new(0, 44, 1, 0), BackgroundColor3 = C.peri, TextColor3 = C.ink,
+    Text = "▶", Font = Enum.Font.ArialBold, TextSize = 16, BorderSizePixel = 0,
+}, pageBar)
+mk("UICorner", { CornerRadius = UDim.new(0, 4) }, pageNext)
+local pageLabel = mk("TextLabel", {
+    BackgroundTransparency = 1, Position = UDim2.new(0, 48, 0, 0), Size = UDim2.new(1, -96, 1, 0),
+    Text = "", Font = Enum.Font.Arial, TextSize = 14, TextColor3 = C.text,
+    TextTruncate = Enum.TextTruncate.AtEnd,
+}, pageBar)
+
+local function updatePageBar()
+    local multi = panelState.total > 1
+    pageBar.Visible = multi
+    textScroll.Position = UDim2.new(0, 6, 0, multi and 62 or 36)
+    textScroll.Size = UDim2.new(1, -12, 1, multi and -70 or -44)
+    pageLabel.Text = string.format("Phần %d/%d  (vị trí %d - %d)",
+        panelState.page, panelState.total, panelState.from, panelState.to)
+end
 
 local editor = mk("TextBox", {
     Name = "Text", BackgroundTransparency = 1, BorderSizePixel = 0,
@@ -964,9 +1045,12 @@ local function refreshFileList()
                 selected = items[1]
                 holding = nil
                 dirty = false
+                panelState.page = 1
                 loadBoxes()
                 refreshAll()
-                setEditorText(buildText())
+                setEditorText()
+                CONFIG.LastArrayFile = name
+                persistConfig()
                 notify("Đã Import " .. name .. " (" .. #items .. " phần tử).", C.green)
                 toggleWin(fileWin)
             end
@@ -984,6 +1068,7 @@ fileActionBtn.Activated:Connect(function()
         if not okWrite then notify("Export lỗi: " .. tostring(err), C.red) return end
         notify("Đã Export: " .. name, C.green)
         refreshFileList()
+        CONFIG.LastArrayFile = name
         persistConfig()
     else
         refreshFileList()
@@ -1006,102 +1091,85 @@ fileActionBtn.Activated:Connect(function()
     if fileMode == "import" then refreshFileList() end
 end)
 
--- Văn bản trong Panel tự đồng bộ với danh sách, trừ khi người dùng đang soạn dở.
--- Ô TextBox của Roblox chỉ chứa tối đa 200000 ký tự, nên Array dài được chia thành nhiều phần.
-local EDITOR_PART_LIMIT = 190000
+-- Văn bản trong Panel tự đồng bộ với danh sách, trừ khi người dùng đang soạn dở
 local programmatic = false
 dirty = false
-local editorParts = { "" }
-local curPart = 1
-
--- Cắt văn bản thành các đoạn <= EDITOR_PART_LIMIT, ưu tiên cắt ở cuối dòng.
--- Nối lại các đoạn (table.concat) sẽ ra đúng văn bản gốc.
-local function splitEditorText(t)
-    local parts, pos = {}, 1
-    while #t - pos + 1 > EDITOR_PART_LIMIT do
-        local window = t:sub(pos, pos + EDITOR_PART_LIMIT - 1)
-        local lastNl = window:match(".*()\n")
-        local cut = lastNl or EDITOR_PART_LIMIT
-        parts[#parts + 1] = t:sub(pos, pos + cut - 1)
-        pos = pos + cut
+-- Cắt Array thành nhiều phần (mỗi phần là một bảng { ... } hoàn chỉnh) để không vượt giới hạn 200000 ký tự.
+local function buildParts()
+    local texts = {}
+    for i, it in ipairs(BlockArray) do
+        texts[i] = entryText(i, it)
     end
-    parts[#parts + 1] = t:sub(pos)
+    local ranges, first, size = {}, 1, 0
+    for i = 1, #texts do
+        local len = #texts[i] + 2
+        if size + len > CONFIG.PartLimit and i > first then
+            ranges[#ranges + 1] = { first, i - 1 }
+            first, size = i, 0
+        end
+        size = size + len
+    end
+    ranges[#ranges + 1] = { first, #texts }
+
+    local parts, n = {}, #ranges
+    for p, r in ipairs(ranges) do
+        local lines = {}
+        if n > 1 then
+            lines[#lines + 1] = string.format(
+                "-- PHẦN %d/%d (vị trí %d - %d). Sửa xong bấm Apply: chỉ thay đúng phần này.", p, n, r[1], r[2])
+        end
+        lines[#lines + 1] = "local BlockArray = {"
+        for i = r[1], r[2] do
+            lines[#lines + 1] = texts[i]
+            if i < r[2] then lines[#lines + 1] = "" end
+        end
+        lines[#lines + 1] = "}"
+        parts[p] = { text = table.concat(lines, "\n"), from = r[1], to = r[2] }
+    end
     return parts
 end
 
--- Thanh chuyển phần ở cuối Panel: « Phần x / n »
-local pagerFrame = mk("Frame", {
-    BackgroundTransparency = 1, Position = UDim2.new(0, 6, 1, -36), Size = UDim2.new(1, -12, 0, 30),
-}, pbody)
-local prevPartBtn = mk("TextButton", {
-    Position = UDim2.new(0, 0, 0, 0), Size = UDim2.new(0, 44, 1, 0), BackgroundColor3 = C.peri,
-    TextColor3 = C.ink, Font = Enum.Font.ArialBold, TextSize = 18, BorderSizePixel = 0, Text = "«",
-}, pagerFrame)
-local nextPartBtn = mk("TextButton", {
-    AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, 0, 0, 0), Size = UDim2.new(0, 44, 1, 0),
-    BackgroundColor3 = C.peri, TextColor3 = C.ink, Font = Enum.Font.ArialBold, TextSize = 18,
-    BorderSizePixel = 0, Text = "»",
-}, pagerFrame)
-local pageLabel = mk("TextLabel", {
-    BackgroundTransparency = 1, AnchorPoint = Vector2.new(0.5, 0), Position = UDim2.new(0.5, 0, 0, 0),
-    Size = UDim2.new(0, 200, 1, 0), TextColor3 = C.text, Font = Enum.Font.Arial, TextSize = 14, Text = "",
-}, pagerFrame)
-
-local function updatePager()
-    local n = #editorParts
-    if n > 1 then
-        pageLabel.Text = "Phần " .. curPart .. " / " .. n
-    else
-        pageLabel.Text = "Một phần"
+-- Hiển thị phần hiện tại của Array trong Editor. Không bao giờ ném lỗi (để Execute/Apply không bị chặn).
+setEditorText = function()
+    local okBuild, parts = pcall(buildParts)
+    if not okBuild or not parts or #parts == 0 then
+        warn("[ArrayPlacementTool] Không dựng được văn bản Array: " .. tostring(parts))
+        return
     end
-    prevPartBtn.Visible = n > 1
-    nextPartBtn.Visible = n > 1
-end
+    panelState.total = #parts
+    panelState.page = math.clamp(panelState.page, 1, #parts)
+    local part = parts[panelState.page]
+    panelState.from, panelState.to = part.from, part.to
 
--- Lưu nội dung đang hiển thị vào đúng phần của nó
-local function saveCurrentPart()
-    editorParts[curPart] = editor.Text
-end
-
-local function showPart(index)
-    curPart = math.clamp(index, 1, #editorParts)
     programmatic = true
-    editor.Text = editorParts[curPart]
+    local okSet, setErr = pcall(function() editor.Text = part.text end)
+    if not okSet then
+        warn("[ArrayPlacementTool] Không gán được Text cho Editor: " .. tostring(setErr))
+        pcall(function() editor.Text = "-- Phần này quá dài để hiển thị. Hãy dùng Export/Copy." end)
+    end
     programmatic = false
-    updatePager()
-end
-
--- Toàn bộ văn bản Array (ghép mọi phần lại)
-local function fullEditorText()
-    saveCurrentPart()
-    return table.concat(editorParts)
-end
-
-prevPartBtn.Activated:Connect(function()
-    if curPart > 1 then
-        saveCurrentPart()
-        showPart(curPart - 1)
-    end
-end)
-nextPartBtn.Activated:Connect(function()
-    if curPart < #editorParts then
-        saveCurrentPart()
-        showPart(curPart + 1)
-    end
-end)
-
-setEditorText = function(t)
-    editorParts = splitEditorText(t)
-    showPart(curPart)
     dirty = false
+    updatePageBar()
 end
+
+local function gotoPage(delta)
+    if dirty then
+        notify("Phần đang sửa chưa Apply. Hãy bấm Apply trước khi chuyển phần.", C.yellow)
+        return
+    end
+    local np = panelState.page + delta
+    if np < 1 or np > panelState.total then return end
+    panelState.page = np
+    setEditorText()
+end
+pagePrev.Activated:Connect(function() gotoPage(-1) end)
+pageNext.Activated:Connect(function() gotoPage(1) end)
 editor:GetPropertyChangedSignal("Text"):Connect(function()
     if not programmatic then dirty = true end
 end)
-updatePager()
 local function syncPanel()
     if not dirty then
-        setEditorText(buildText())
+        setEditorText()
     end
 end
 
@@ -1282,7 +1350,11 @@ end
 
 refreshAll = function()
     refreshList()
-    syncPanel()
+    -- Lỗi ở Editor không được làm hỏng Execute / Apply
+    local okSync, syncErr = pcall(syncPanel)
+    if not okSync then
+        warn("[ArrayPlacementTool] syncPanel lỗi: " .. tostring(syncErr))
+    end
 end
 
 searchBox:GetPropertyChangedSignal("Text"):Connect(function()
@@ -1393,27 +1465,38 @@ applyBtn.Activated:Connect(function()
         notify("Đang chạy, không thể Apply.", C.yellow)
         return
     end
-    local items, err = parseArrayText(fullEditorText())
+    local items, err = parseArrayText(editor.Text)
     if not items then
         notify("Apply lỗi: " .. tostring(err), C.red)
         return
     end
-    BlockArray = items
+    if panelState.total <= 1 then
+        BlockArray = items
+    else
+        -- Array được cắt nhiều phần: chỉ thay các phần tử thuộc phần đang sửa
+        local merged = {}
+        for i = 1, panelState.from - 1 do merged[#merged + 1] = BlockArray[i] end
+        for _, it in ipairs(items) do merged[#merged + 1] = it end
+        for i = panelState.to + 1, #BlockArray do merged[#merged + 1] = BlockArray[i] end
+        BlockArray = merged
+    end
     selected = items[1]
     holding = nil
     dirty = false
     loadBoxes()
     refreshAll()
-    setEditorText(buildText())
+    setEditorText()
     persistConfig()
-    notify("Đã Apply " .. #items .. " phần tử.", C.green)
+    if panelState.total > 1 then
+        notify(string.format("Đã Apply phần %d/%d (%d phần tử). Tổng: %d.",
+            panelState.page, panelState.total, #items, #BlockArray), C.green)
+    else
+        notify("Đã Apply " .. #items .. " phần tử.", C.green)
+    end
 end)
 
 clearBtn.Activated:Connect(function()
-    -- tính là người dùng đã sửa: không tự ghi đè nữa cho tới khi Apply
-    editorParts = { "" }
-    showPart(1)
-    dirty = true
+    editor.Text = "" -- tính là người dùng đã sửa: không tự ghi đè nữa cho tới khi Apply
 end)
 
 copyAllBtn.Activated:Connect(function()
@@ -1562,8 +1645,7 @@ end
 -- Cơ chế Copy nhiều block (lấy từ MasterTool V49):
 -- Block đầu tiên đặt tại đích; các block còn lại đặt tạm trên cao, cách xa nhau.
 -- Chỉ sau khi tạo xong tất cả mới Resize/Move chúng về CFrame đích.
-local STAGE_GAP = 10
-local STAGE_HEIGHT = 60
+-- Khoảng cách / độ cao đặt tạm lấy từ CONFIG.StageGap / CONFIG.StageHeight (chỉnh trong Cài đặt)
 
 local function assignStageCFrames(snapshot)
     for _, job in ipairs(snapshot) do
@@ -1594,12 +1676,12 @@ local function assignStageCFrames(snapshot)
         end
     end
 
-    local spacing = maxDim + STAGE_GAP
+    local spacing = maxDim + CONFIG.StageGap
     local count = #snapshot - 1
     local cols = math.ceil(math.sqrt(count))
     local rows = math.ceil(count / cols)
     local centerX, centerZ = (minX + maxX) / 2, (minZ + maxZ) / 2
-    local stageY = maxY + STAGE_HEIGHT
+    local stageY = maxY + CONFIG.StageHeight
 
     for i = 2, #snapshot do
         local index = i - 2
@@ -1772,8 +1854,7 @@ execBtn.Activated:Connect(function()
     refreshList()
 
     task.spawn(function()
-        -- pcall đảm bảo luôn mở khóa nút Execute dù có lỗi bất ngờ giữa chừng
-        local runOk, runErr = pcall(function()
+      local okRun, runErr = pcall(function()
         local total = #BlockArray
         local batchSize = math.max(1, math.floor(tonumber(CONFIG.BatchSize) or 1))
         local success, failed = 0, 0
@@ -1868,18 +1949,17 @@ execBtn.Activated:Connect(function()
             end
         end
         notify(msg, failed > 0 and C.yellow or C.green)
-        end)
-
+      end)
+      if not okRun then
+        warn("[BlockArrayTool] Execute lỗi: " .. tostring(runErr))
         setLocked(false)
-        refreshAll()
-        if not runOk then
-            warn("[BlockArrayTool] Execute lỗi: " .. tostring(runErr))
-            notify("Execute lỗi: " .. tostring(runErr), C.red)
-        end
+        pcall(refreshList)
+        notify("Execute lỗi: " .. tostring(runErr), C.red)
+      end
     end)
 end)
 
-local function initSelectBlock()
+local function initSelectBlock() -- SELECT BLOCK: hàm riêng có bộ thanh ghi riêng (tránh vượt giới hạn 200 local)
 ----------------------------------------------------------------
 -- SELECT BLOCK
 ----------------------------------------------------------------
@@ -2431,7 +2511,7 @@ applySelectedBtn.Activated:Connect(function()
     if added > 0 then
         selected = BlockArray[#BlockArray - added + 1]
         refreshAll()
-        setEditorText(buildText())
+        setEditorText()
         notify("Đã thêm " .. added .. " Value từ Part vào Array (Vector + Resize; Block mặc định).", C.green)
     else
         notify("Hãy chọn ít nhất một Block hợp lệ trước khi Apply.", C.yellow)
@@ -2482,7 +2562,7 @@ task.spawn(function()
         end
     end
 end)
-end
+end -- kết thúc SELECT BLOCK
 initSelectBlock()
 
 ----------------------------------------------------------------
@@ -2589,36 +2669,80 @@ delayBox.FocusLost:Connect(function()
     end
 end)
 
-setLabel(6, "Số Block đặt cùng lúc (1 - 20)")
+setLabel(6, "Số Block đặt cùng lúc (1 - 1000)")
 local batchBox = setBox(7, tostring(CONFIG.BatchSize))
 batchBox.FocusLost:Connect(function()
     local n = math.floor(tonumber(batchBox.Text) or 0)
-    if n >= 1 and n <= 20 then
+    if n >= 1 and n <= 1000 then
         CONFIG.BatchSize = n
         persistConfig()
         notify("Đã đặt " .. n .. " Block cùng lúc.", C.green)
     else
         batchBox.Text = tostring(CONFIG.BatchSize)
-        notify("Giá trị phải từ 1 đến 20.", C.red)
+        notify("Giá trị phải từ 1 đến 1000.", C.red)
     end
 end)
+
+do -- Cài đặt mới: STAGE_GAP, STAGE_HEIGHT, tự load Resize GUI
+    local function numberSetting(order, labelText, key, minV, maxV, okMsg)
+        setLabel(order, labelText)
+        local box = setBox(order + 1, tostring(CONFIG[key]))
+        box.FocusLost:Connect(function()
+            local n = tonumber(box.Text)
+            if n and n >= minV and n <= maxV then
+                CONFIG[key] = n
+                box.Text = tostring(n)
+                persistConfig()
+                notify(okMsg .. n, C.green)
+            else
+                box.Text = tostring(CONFIG[key])
+                notify(string.format("Giá trị phải từ %s đến %s.", tostring(minV), tostring(maxV)), C.red)
+            end
+        end)
+    end
+    numberSetting(10, "Khoảng cách Block tạm - STAGE_GAP (0 - 1000)", "StageGap", 0, 1000, "Đã đổi STAGE_GAP: ")
+    numberSetting(12, "Độ cao Block tạm - STAGE_HEIGHT (0 - 5000)", "StageHeight", 0, 5000, "Đã đổi STAGE_HEIGHT: ")
+
+    local resizeToggle = mk("TextButton", {
+        LayoutOrder = 9, Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.peri, TextColor3 = C.ink,
+        Font = Enum.Font.ArialBold, TextSize = 14, BorderSizePixel = 0, Text = "",
+    }, sList)
+    local function refreshResizeToggle()
+        resizeToggle.Text = "Tự động load Resize GUI: " .. (CONFIG.AutoLoadResizeGui and "BẬT" or "TẮT")
+    end
+    refreshResizeToggle()
+    resizeToggle.Activated:Connect(function()
+        CONFIG.AutoLoadResizeGui = not CONFIG.AutoLoadResizeGui
+        refreshResizeToggle()
+        persistConfig()
+        notify(CONFIG.AutoLoadResizeGui
+            and "Sẽ tự áp dụng kích thước GUI đã lưu khi chạy script."
+            or "Đã tắt tự động load Resize GUI.", C.green)
+    end)
+end
 
 ----------------------------------------------------------------
 -- KHỞI ĐỘNG
 ----------------------------------------------------------------
--- Nếu Auto Load Config bật, nạp ArrayText đã lưu khi script khởi động.
-if autoLoadConfig and startupConfig and type(startupConfig.ArrayText) == "string" and startupConfig.ArrayText ~= "" then
-    local loadedItems, loadErr = parseArrayText(startupConfig.ArrayText)
-    if loadedItems then
-        BlockArray = loadedItems
-        selected = BlockArray[1]
+-- Config không còn lưu nội dung Array (làm Config nặng). Nếu Auto Load Config bật,
+-- nạp lại file Array dùng gần nhất (Import/Export) trong thư mục ArrayPlacementTool.
+if autoLoadConfig and CONFIG.LastArrayFile ~= "" and not CONFIG.LastArrayFile:find("[/\\]") then
+    local okRead, content = pcall(readfile, ROOT_FOLDER .. "/" .. CONFIG.LastArrayFile)
+    if okRead and type(content) == "string" then
+        local loadedItems, loadErr = parseArrayText(content)
+        if loadedItems then
+            BlockArray = loadedItems
+            selected = BlockArray[1]
+        else
+            warn("[ArrayPlacementTool] Auto Load Config lỗi: " .. tostring(loadErr))
+        end
     else
-        warn("[ArrayPlacementTool] Auto Load Config lỗi: " .. tostring(loadErr))
+        warn("[ArrayPlacementTool] Không đọc được file Array gần nhất: " .. CONFIG.LastArrayFile)
     end
 end
 loadBoxes()
 refreshAll()
-setEditorText(buildText())
+setEditorText()
 if startupConfig and type(startupConfig.ShowSearch) == "boolean" then
     showSearch = startupConfig.ShowSearch
     applySearchVisibility()
