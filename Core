@@ -156,6 +156,7 @@ local function newItem(path)
         PathBlock = path or DEFAULT_PATH,
         CF = CFrame.new(0, 5, 0),
         Resize = Vector3.new(4, 4, 4),
+        Material = nil, -- Material gốc lấy từ Part được chọn (nếu có)
         Status = nil, -- nil | "run" | "ok" | "fail"
     }
 end
@@ -376,10 +377,11 @@ end
 local function entryText(i, it)
     local c = cfStrings(it.CF)
     return string.format(
-        '    -- Vị trí array %d\n    { PathBlock = %q,\n      Vector = CFrame.new(%s, %s, %s, %s,%s,%s, %s,%s,%s, %s,%s,%s),\n      Resize = Vector3.new(%s, %s, %s),\n    },',
+        '    -- Vị trí array %d\n    { PathBlock = %q,\n      Vector = CFrame.new(%s, %s, %s, %s,%s,%s, %s,%s,%s, %s,%s,%s),\n      Resize = Vector3.new(%s, %s, %s),\n      Material = %q,\n    },',
         i, it.PathBlock or "",
         c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10], c[11], c[12],
-        fmtNum(it.Resize.X), fmtNum(it.Resize.Y), fmtNum(it.Resize.Z)
+        fmtNum(it.Resize.X), fmtNum(it.Resize.Y), fmtNum(it.Resize.Z),
+        (it.Material and it.Material.Name) or ""
     )
 end
 
@@ -435,6 +437,10 @@ local function parseArrayText(src)
         local it = newItem(trim(path))
         it.CF = cf
         it.Resize = sz
+        local materialName = b:match('Material%s*=%s*"(.-)"') or b:match("Material%s*=%s*'(.-)'")
+        if materialName and materialName ~= "" and Enum.Material[materialName] then
+            it.Material = Enum.Material[materialName]
+        end
         items[#items + 1] = it
     end
     return items
@@ -1758,7 +1764,7 @@ local function placeBatch(batch)
             local ok, ret = pcall(function()
                 return remote:InvokeServer(
                     job.Template, job.PlaceCF,
-                    BrickColor.new(CONFIG.BlockColor), CONFIG.BlockMaterial
+                    BrickColor.new(CONFIG.BlockColor), (job.Item and job.Item.Material) or CONFIG.BlockMaterial
                 )
             end)
             if not ok then
@@ -2078,9 +2084,23 @@ local row6 = selRow(6, 34)
 local pickBtn = selButton(row6, "Chọn nhiều Part", 0, 0.5, 12)
 local unpickBtn = selButton(row6, "Bỏ chọn tất cả", 0.5, 0.5, 18)
 local row7 = selRow(7, 34)
-local applySelectedBtn = selButton(row7, "Apply", 0, 1, 18)
+local applySelectedBtn = selButton(row7, "Apply", 0, 0.68, 18)
+local optionsBtn = selButton(row7, "Options", 0.68, 0.32, 13)
+local optionsFrame = mk("Frame", {LayoutOrder = 8, BackgroundColor3 = C.navy2, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 62), Visible = false}, right)
+local autoBlockMapping = true
+local copyPartMaterial = true
+local function optionToggle(parent, y, label, getter)
+    local b = mk("TextButton", {Position = UDim2.new(0, 3, 0, y), Size = UDim2.new(1, -6, 0, 26), BackgroundColor3 = C.peri, TextColor3 = C.ink, Font = Enum.Font.Arial, TextSize = 12, BorderSizePixel = 0}, parent)
+    local function refresh() b.Text = label .. (getter() and ": BẬT" or ": TẮT") end
+    b.Activated:Connect(function() if label == "Tự nhận dạng Block" then autoBlockMapping = not autoBlockMapping else copyPartMaterial = not copyPartMaterial end refresh() end)
+    refresh()
+    return b
+end
+optionToggle(optionsFrame, 3, "Tự nhận dạng Block", function() return autoBlockMapping end)
+optionToggle(optionsFrame, 32, "Sao chép Material", function() return copyPartMaterial end)
+optionsBtn.Activated:Connect(function() optionsFrame.Visible = not optionsFrame.Visible end)
 local multiCountLabel = mk("TextLabel", {
-    LayoutOrder = 8, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 18),
+    LayoutOrder = 9, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 18),
     Text = "Đã chọn: 0 Part", Font = Enum.Font.Arial, TextSize = 13, TextColor3 = C.yellow,
     TextXAlignment = Enum.TextXAlignment.Left,
 }, right)
@@ -2554,6 +2574,26 @@ unpickBtn.Activated:Connect(function()
     clearBlockSelections()
 end)
 
+local function basicBlockPath(name)
+    return "ReplicatedStorage.Blocks.Basic." .. name .. "." .. name
+end
+local function chooseTemplateForPart(part)
+    if not part or not part:IsA("BasePart") or not autoBlockMapping then return DEFAULT_PATH end
+    -- Ưu tiên các thuộc tính đặc biệt trước hình dạng, sau đó mới dùng Block mặc định.
+    if part.CanCollide == false then return basicBlockPath("NoclipBlock") end
+    if part.CastShadow == true then return basicBlockPath("ShadowBlock") end
+    if part:IsA("Part") and part.Shape == Enum.PartType.Cylinder then
+        if part.Transparency > 0 then return basicBlockPath("TransparentBlock") end
+        return "ReplicatedStorage.Blocks.Events.InvisibleBlock.InvisibleBlock"
+    end
+    if part:IsA("Part") and part.Shape == Enum.PartType.Ball then
+        return 'ReplicatedStorage.Blocks.Basic.Sphere .Sphere '
+    end
+    if part.Name == "Wedge" then return basicBlockPath("Wedge") end
+    if part:IsA("Part") and part.Shape == Enum.PartType.Block then return DEFAULT_PATH end
+    return DEFAULT_PATH
+end
+
 applySelectedBtn.Activated:Connect(function()
     if isRunning then
         notify("Không thể Apply khi Array đang chạy.", C.yellow)
@@ -2564,9 +2604,10 @@ applySelectedBtn.Activated:Connect(function()
         if block and block:IsA("BasePart") and block.Parent then
             local cf, size = blockInfo(block)
             if cf and size then
-                local item = newItem() -- PathBlock giữ mặc định; chỉ lấy Vector/Resize từ object
+                local item = newItem(chooseTemplateForPart(block))
                 item.CF = cf
                 item.Resize = size
+                if copyPartMaterial then item.Material = block.Material end
                 BlockArray[#BlockArray + 1] = item
                 added += 1
             end
