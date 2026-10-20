@@ -38,6 +38,7 @@ local CONFIG = {
     AutoLoadResizeGui = false, -- true: tự áp dụng kích thước GUI đã lưu khi khởi động script
     LastArrayFile = "",     -- file Array dùng gần nhất (Auto Load Config sẽ nạp lại file này)
     UISizes = {},           -- kích thước các cửa sổ: { TênCửaSổ = { Rộng, Cao } }
+    SelectAnyPart = false,  -- true: chọn được MỌI BasePart (không cần tên Part/ColorPart)
 }
 
 local DEFAULT_PATH = "ReplicatedStorage.Blocks.Basic.Block.Block"
@@ -110,7 +111,7 @@ pcall(function()
     if isfile(CONFIG_FILE) then
         startupConfig = HttpService:JSONDecode(readfile(CONFIG_FILE))
     else
-        local initial = { AutoLoadConfig = false, BuildContainer = "workspace.BuildModel", StepDelay = 0.1, BatchSize = 5, StopOnError = true, ShowSearch = true, StageGap = 10, StageHeight = 60, AutoLoadResizeGui = false, LastArrayFile = "", UISizes = {} }
+        local initial = { AutoLoadConfig = false, BuildContainer = "workspace.BuildModel", StepDelay = 0.1, BatchSize = 5, StopOnError = true, ShowSearch = true, StageGap = 10, StageHeight = 60, AutoLoadResizeGui = false, LastArrayFile = "", UISizes = {}, SelectAnyPart = false }
         writefile(CONFIG_FILE, HttpService:JSONEncode(initial))
         startupConfig = initial
     end
@@ -140,6 +141,7 @@ local function persistConfig(extra)
             AutoLoadResizeGui = CONFIG.AutoLoadResizeGui == true,
             LastArrayFile = CONFIG.LastArrayFile or "",
             UISizes = sizes,
+            SelectAnyPart = CONFIG.SelectAnyPart == true,
         }
         if extra then for k, v in pairs(extra) do data[k] = v end end
         writefile(CONFIG_FILE, HttpService:JSONEncode(data))
@@ -171,6 +173,7 @@ if startupConfig then
     if tonumber(startupConfig.StageHeight) then CONFIG.StageHeight = math.clamp(tonumber(startupConfig.StageHeight), 0, 5000) end
     if type(startupConfig.AutoLoadResizeGui) == "boolean" then CONFIG.AutoLoadResizeGui = startupConfig.AutoLoadResizeGui end
     if type(startupConfig.LastArrayFile) == "string" then CONFIG.LastArrayFile = startupConfig.LastArrayFile end
+    if type(startupConfig.SelectAnyPart) == "boolean" then CONFIG.SelectAnyPart = startupConfig.SelectAnyPart end
     if type(startupConfig.UISizes) == "table" then
         for name, v in pairs(startupConfig.UISizes) do
             if type(name) == "string" and type(v) == "table" and tonumber(v[1]) and tonumber(v[2]) then
@@ -1968,6 +1971,7 @@ gui.Destroying:Connect(function() alive = false end)
 
 local selBlock = nil     -- Block đang xem thông tin (block được chọn gần nhất)
 local selectedBlocks = {} -- Danh sách nhiều BasePart được chọn
+local selectedSet = {}    -- Tra cứu nhanh O(1): selectedSet[part] = true
 local blockHighlights = {} -- Highlight vàng theo từng BasePart
 local highlightsVisible = true
 local picking = false    -- chế độ chạm chọn từng Part
@@ -2159,10 +2163,7 @@ local function buildView()
 end
 
 local function isBlockSelected(block)
-    for _, item in ipairs(selectedBlocks) do
-        if item == block then return true end
-    end
-    return false
+    return selectedSet[block] == true
 end
 
 local function updateHighlightVisibility()
@@ -2171,7 +2172,9 @@ local function updateHighlightVisibility()
             if highlight then highlight:Destroy() end
             blockHighlights[block] = nil
         else
-            highlight.Enabled = highlightsVisible
+            if highlight.Enabled ~= highlightsVisible then
+                highlight.Enabled = highlightsVisible
+            end
         end
     end
     hideHighlightsBtn.Text = highlightsVisible and "Ẩn HL" or "Hiện HL"
@@ -2180,55 +2183,91 @@ local function updateHighlightVisibility()
 end
 
 local function refreshMultiCount()
+    local oldN = #selectedBlocks
     local count = 0
-    for i = #selectedBlocks, 1, -1 do
+    for i = 1, oldN do
         local part = selectedBlocks[i]
-        if not part or not part:IsA("BasePart") or not part.Parent then
-            table.remove(selectedBlocks, i)
-        else
+        if part and part.Parent and part:IsA("BasePart") then
             count += 1
+            selectedBlocks[count] = part
+        elseif part then
+            selectedSet[part] = nil
         end
+    end
+    for i = oldN, count + 1, -1 do
+        selectedBlocks[i] = nil
     end
     multiCountLabel.Text = "Đã chọn: " .. count .. " Part"
 end
 
-local function addBlockSelection(block)
-    -- Phòng vệ ở đầu hàm: không cho Model hoặc instance khác lọt vào selection.
-    if not block or not block:IsA("BasePart") or not block.Parent then return end
-    if not isBlockSelected(block) then
-        selectedBlocks[#selectedBlocks + 1] = block
-        if block:IsA("BasePart") then
-            local h = Instance.new("Highlight")
-            h.Name = "ArraySelectedBlockHighlight"
-            h.Adornee = block
-            h.FillColor = Color3.fromRGB(255, 220, 0)
-            h.OutlineColor = Color3.fromRGB(255, 245, 130)
-            h.FillTransparency = 0.55
-            h.OutlineTransparency = 0
-            h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-            h.Enabled = highlightsVisible
-            h.Parent = workspace
-            blockHighlights[block] = h
+local function newHighlight(block)
+    local h = Instance.new("Highlight")
+    h.Name = "ArraySelectedBlockHighlight"
+    h.Adornee = block
+    h.FillColor = Color3.fromRGB(255, 220, 0)
+    h.OutlineColor = Color3.fromRGB(255, 245, 130)
+    h.FillTransparency = 0.55
+    h.OutlineTransparency = 0
+    h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+    h.Enabled = highlightsVisible
+    h.Parent = workspace
+    return h
+end
+
+-- Chọn cả danh sách trong MỘT lần: chỉ cập nhật số đếm / thông tin / viewport một lần ở cuối.
+local function addBlocksSelection(list)
+    local last = nil
+    for _, block in ipairs(list) do
+        -- Phòng vệ: không cho Model hoặc instance khác lọt vào selection.
+        if block and block:IsA("BasePart") and block.Parent then
+            if not selectedSet[block] then
+                selectedSet[block] = true
+                selectedBlocks[#selectedBlocks + 1] = block
+                blockHighlights[block] = newHighlight(block)
+            end
+            last = block
         end
     end
-    selBlock = block
+    if not last then return end
+    selBlock = last
     refreshMultiCount()
     updateHighlightVisibility()
     refreshInfo()
     buildView()
 end
 
-local function removeBlockSelection(block)
-    for i = #selectedBlocks, 1, -1 do
-        if selectedBlocks[i] == block then
-            table.remove(selectedBlocks, i)
-            break
+local function addBlockSelection(block)
+    addBlocksSelection({ block })
+end
+
+-- Bỏ chọn cả danh sách trong MỘT lần (lọc mảng một lượt, không table.remove từng cái).
+local function removeBlocksSelection(list)
+    local drop, any = {}, false
+    for _, block in ipairs(list) do
+        if block and selectedSet[block] then
+            drop[block] = true
+            any = true
         end
     end
-    local highlight = blockHighlights[block]
-    if highlight then highlight:Destroy() end
-    blockHighlights[block] = nil
-    if selBlock == block then
+    if not any then return end
+    local oldN = #selectedBlocks
+    local keep = 0
+    for i = 1, oldN do
+        local block = selectedBlocks[i]
+        if drop[block] then
+            selectedSet[block] = nil
+            local highlight = blockHighlights[block]
+            if highlight then highlight:Destroy() end
+            blockHighlights[block] = nil
+        else
+            keep += 1
+            selectedBlocks[keep] = block
+        end
+    end
+    for i = oldN, keep + 1, -1 do
+        selectedBlocks[i] = nil
+    end
+    if selBlock and drop[selBlock] then
         selBlock = selectedBlocks[#selectedBlocks]
     end
     refreshMultiCount()
@@ -2236,8 +2275,13 @@ local function removeBlockSelection(block)
     buildView()
 end
 
+local function removeBlockSelection(block)
+    removeBlocksSelection({ block })
+end
+
 local function clearBlockSelections()
     table.clear(selectedBlocks)
+    table.clear(selectedSet)
     for block, highlight in pairs(blockHighlights) do
         if highlight then highlight:Destroy() end
         blockHighlights[block] = nil
@@ -2285,6 +2329,12 @@ end
 -- Giữ tên Part/ColorPart để không chọn nhầm địa hình hoặc vật thể GUI khác trong Workspace.
 local function findSelectablePart(inst)
     if not inst or not inst:IsA("BasePart") then return nil end
+    if CONFIG.SelectAnyPart then
+        -- Tùy chọn "Chọn mọi Part": bỏ qua tên, chỉ loại nhân vật của bạn
+        local char = Players.LocalPlayer and Players.LocalPlayer.Character
+        if char and inst:IsDescendantOf(char) then return nil end
+        return inst
+    end
     if inst.Name ~= "Part" and inst.Name ~= "ColorPart" then return nil end
     return inst
 end
@@ -2309,7 +2359,7 @@ local pickConn = UserInputService.InputBegan:Connect(function(input, processed)
     end
     local block = findSelectablePart(res.Instance)
     if not block then
-        notify("Vật thể này không phải Part có tên Part/ColorPart.", C.yellow)
+        notify(CONFIG.SelectAnyPart and "Vật thể này không chọn được." or "Vật thể này không phải Part có tên Part/ColorPart. Bật \"Chọn mọi Part\" trong Cài đặt để chọn Part khác tên.", C.yellow)
         return
     end
     addBlockSelection(block)
@@ -2382,13 +2432,35 @@ end
 
 -- Gom các BasePart được hỗ trợ trên Workspace; không thêm Model cha/container vào danh sách.
 local function collectAllBlocks()
-    local found = {}
+    local found, n = {}, 0
+    if CONFIG.SelectAnyPart then
+        local char = Players.LocalPlayer and Players.LocalPlayer.Character
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if d:IsA("BasePart") and not (char and d:IsDescendantOf(char)) then
+                n += 1
+                found[n] = d
+            end
+        end
+        return found
+    end
     for _, d in ipairs(workspace:GetDescendants()) do
-        if d:IsA("BasePart") and (d.Name == "Part" or d.Name == "ColorPart") then
-            found[#found + 1] = d
+        local name = d.Name
+        if (name == "Part" or name == "ColorPart") and d:IsA("BasePart") then
+            n += 1
+            found[n] = d
         end
     end
     return found
+end
+
+-- 8 góc của hộp (hệ số -1/+1), tạo một lần thay vì tạo bảng mới trong mỗi vòng lặp
+local CORNER_SIGNS = {}
+for _, sx in ipairs({ -1, 1 }) do
+    for _, sy in ipairs({ -1, 1 }) do
+        for _, sz in ipairs({ -1, 1 }) do
+            CORNER_SIGNS[#CORNER_SIGNS + 1] = Vector3.new(sx, sy, sz)
+        end
+    end
 end
 
 local function getBlocksInRect(x1, y1, x2, y2)
@@ -2401,16 +2473,12 @@ local function getBlocksInRect(x1, y1, x2, y2)
             local half = size / 2
             local bx1, by1, bx2, by2 = math.huge, math.huge, -math.huge, -math.huge
             local front = false
-            for _, sx in ipairs({-1, 1}) do
-                for _, sy in ipairs({-1, 1}) do
-                    for _, sz in ipairs({-1, 1}) do
-                        local point = camera:WorldToScreenPoint(cf * Vector3.new(sx * half.X, sy * half.Y, sz * half.Z))
-                        if point.Z > 0 then
-                            front = true
-                            bx1, bx2 = math.min(bx1, point.X), math.max(bx2, point.X)
-                            by1, by2 = math.min(by1, point.Y), math.max(by2, point.Y)
-                        end
-                    end
+            for k = 1, 8 do
+                local point = camera:WorldToScreenPoint(cf * (CORNER_SIGNS[k] * half))
+                if point.Z > 0 then
+                    front = true
+                    bx1, bx2 = math.min(bx1, point.X), math.max(bx2, point.X)
+                    by1, by2 = math.min(by1, point.Y), math.max(by2, point.Y)
                 end
             end
             if front then
@@ -2462,14 +2530,10 @@ local function dragSelectAction(_, state, input)
                 hits = getBlocksInRect(x1, y1, x2, y2)
             end
             local before = #selectedBlocks
-            for _, block in ipairs(hits) do
-                if block then
-                    if dragAddMode then
-                        addBlockSelection(block)
-                    else
-                        removeBlockSelection(block)
-                    end
-                end
+            if dragAddMode then
+                addBlocksSelection(hits)   -- chọn tất cả trong 1 lần
+            else
+                removeBlocksSelection(hits) -- bỏ chọn tất cả trong 1 lần
             end
             local delta = math.abs(#selectedBlocks - before)
             notify((dragAddMode and "Đã thêm chọn " or "Đã bỏ chọn ") .. delta .. " Part.", C.green)
@@ -2702,6 +2766,23 @@ do -- Cài đặt mới: STAGE_GAP, STAGE_HEIGHT, tự load Resize GUI
     end
     numberSetting(10, "Khoảng cách Block tạm - STAGE_GAP (0 - 1000)", "StageGap", 0, 1000, "Đã đổi STAGE_GAP: ")
     numberSetting(12, "Độ cao Block tạm - STAGE_HEIGHT (0 - 5000)", "StageHeight", 0, 5000, "Đã đổi STAGE_HEIGHT: ")
+
+    local anyPartToggle = mk("TextButton", {
+        LayoutOrder = 14, Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.peri, TextColor3 = C.ink,
+        Font = Enum.Font.ArialBold, TextSize = 13, BorderSizePixel = 0, Text = "",
+    }, sList)
+    local function refreshAnyPartToggle()
+        anyPartToggle.Text = "Chọn mọi Part (không cần tên): " .. (CONFIG.SelectAnyPart and "BẬT" or "TẮT")
+    end
+    refreshAnyPartToggle()
+    anyPartToggle.Activated:Connect(function()
+        CONFIG.SelectAnyPart = not CONFIG.SelectAnyPart
+        refreshAnyPartToggle()
+        persistConfig()
+        notify(CONFIG.SelectAnyPart
+            and "Kéo vùng / chạm chọn được MỌI Part (trừ nhân vật của bạn)."
+            or "Chỉ chọn Part có tên Part/ColorPart.", C.green)
+    end)
 
     local resizeToggle = mk("TextButton", {
         LayoutOrder = 9, Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.peri, TextColor3 = C.ink,
