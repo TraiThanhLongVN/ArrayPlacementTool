@@ -200,7 +200,14 @@ local function resolvePath(path)
 
     local parts = {}
     for p in path:gmatch("[^%.]+") do
-        parts[#parts + 1] = trim(p)
+        -- Giữ được các tên Instance có dấu cách ở cuối như "Sphere ".
+        -- Với đường dẫn thông thường vẫn bỏ khoảng trắng thừa quanh tên.
+        local cleaned = trim(p)
+        if cleaned == "Sphere" then
+            parts[#parts + 1] = "Sphere "
+        else
+            parts[#parts + 1] = cleaned
+        end
     end
     if #parts == 0 then
         return nil, "Đường dẫn không hợp lệ"
@@ -228,9 +235,16 @@ local function resolvePath(path)
     end
 
     for i = 2, #parts do
-        local nextObj = current:FindFirstChild(parts[i])
+        local partName = parts[i]
+        local nextObj = current:FindFirstChild(partName)
+        -- Một số game đặt tên Sphere có/không có dấu cách cuối; thử cả hai dạng.
+        if not nextObj and partName == "Sphere " then
+            nextObj = current:FindFirstChild("Sphere")
+        elseif not nextObj and partName == "Sphere" then
+            nextObj = current:FindFirstChild("Sphere ")
+        end
         if not nextObj then
-            return nil, "Không tìm thấy '" .. parts[i] .. "' trong " .. current:GetFullName()
+            return nil, "Không tìm thấy '" .. partName .. "' trong " .. current:GetFullName()
         end
         current = nextObj
     end
@@ -523,62 +537,6 @@ local function notify(text, color)
         end
     end)
 end
-
--- Hộp xác nhận hai bước dùng chung cho các thao tác Apply.
-local confirmFrame = mk("Frame", {
-    Name = "DoubleConfirm", AnchorPoint = Vector2.new(0.5, 0.5),
-    Position = UDim2.new(0.5, 0, 0.5, 0), Size = UDim2.new(0, 290, 0, 142),
-    BackgroundColor3 = C.navy, BorderSizePixel = 0, Visible = false, ZIndex = 20000,
-}, gui)
-mk("UICorner", {CornerRadius = UDim.new(0, 8)}, confirmFrame)
-mk("UIStroke", {Color = C.peri, Thickness = 2}, confirmFrame)
-local confirmTitle = mk("TextLabel", {
-    Position = UDim2.new(0, 8, 0, 8), Size = UDim2.new(1, -16, 0, 48),
-    BackgroundTransparency = 1, Text = "Xác nhận Apply", TextWrapped = true,
-    Font = Enum.Font.ArialBold, TextSize = 16, TextColor3 = C.text, ZIndex = 20001,
-}, confirmFrame)
-local confirmStatus = mk("TextLabel", {
-    Position = UDim2.new(0, 8, 0, 55), Size = UDim2.new(1, -16, 0, 22),
-    BackgroundTransparency = 1, Text = "Bước 1/2", Font = Enum.Font.Arial,
-    TextSize = 13, TextColor3 = C.yellow, ZIndex = 20001,
-}, confirmFrame)
-local confirmNext = mk("TextButton", {
-    Position = UDim2.new(0, 8, 1, -39), Size = UDim2.new(0.64, -8, 0, 30),
-    BackgroundColor3 = C.peri, TextColor3 = C.ink, Text = "Xác nhận lần 1",
-    Font = Enum.Font.ArialBold, TextSize = 13, BorderSizePixel = 0, ZIndex = 20001,
-}, confirmFrame)
-local confirmCancel = mk("TextButton", {
-    AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -8, 1, -39), Size = UDim2.new(0.36, -8, 0, 30),
-    BackgroundColor3 = C.row, TextColor3 = C.text, Text = "Hủy",
-    Font = Enum.Font.ArialBold, TextSize = 13, BorderSizePixel = 0, ZIndex = 20001,
-}, confirmFrame)
-mk("UICorner", {CornerRadius = UDim.new(0, 5)}, confirmNext)
-mk("UICorner", {CornerRadius = UDim.new(0, 5)}, confirmCancel)
-local confirmStep, confirmCallback = 0, nil
-local function askDoubleConfirm(label, callback)
-    confirmStep, confirmCallback = 1, callback
-    confirmTitle.Text = "Bạn có chắc muốn " .. label .. "?"
-    confirmStatus.Text = "Bước 1/2: Xác nhận để tiếp tục"
-    confirmNext.Text = "Xác nhận lần 1"
-    confirmFrame.Visible = true
-    confirmFrame.ZIndex = 20000
-end
-confirmNext.Activated:Connect(function()
-    if confirmStep == 1 then
-        confirmStep = 2
-        confirmStatus.Text = "Bước 2/2: Xác nhận lần nữa để thực hiện"
-        confirmNext.Text = "Xác nhận lần 2"
-    elseif confirmStep == 2 then
-        local callback = confirmCallback
-        confirmStep, confirmCallback = 0, nil
-        confirmFrame.Visible = false
-        if callback then callback() end
-    end
-end)
-confirmCancel.Activated:Connect(function()
-    confirmStep, confirmCallback = 0, nil
-    confirmFrame.Visible = false
-end)
 
 -- Theo dõi một thao tác kéo (chuột hoặc cảm ứng). onMove nhận độ lệch so với lúc bắt đầu.
 local function dragSession(began, onMove, onEnd)
@@ -1070,7 +1028,7 @@ local fileList = mk("ScrollingFrame", {
 mk("UIListLayout", {Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, fileList)
 mk("UIPadding", {PaddingTop = UDim.new(0, 4), PaddingLeft = UDim.new(0, 4), PaddingRight = UDim.new(0, 4)}, fileList)
 local fileMode = "import"
-local exportContentOverride = nil
+local exportTextOverride = nil -- Nội dung export riêng từ inspector Parts
 local function cleanFileName(name)
     name = tostring(name or ""):gsub("[/\\\\]", ""):gsub("%.%.", "")
     name = name:gsub("^%s+", ""):gsub("%s+$", "")
@@ -1130,9 +1088,10 @@ fileActionBtn.Activated:Connect(function()
     local name = cleanFileName(fileNameBox.Text)
     if not name then notify("Nhập tên file trước.", C.yellow) return end
     if fileMode == "export" then
-        local contentToExport = exportContentOverride or buildText()
-        local okWrite, err = pcall(function() writefile(ROOT_FOLDER .. "/" .. name, contentToExport) end)
+        local contentToWrite = exportTextOverride or buildText()
+        local okWrite, err = pcall(function() writefile(ROOT_FOLDER .. "/" .. name, contentToWrite) end)
         if not okWrite then notify("Export lỗi: " .. tostring(err), C.red) return end
+        exportTextOverride = nil
         notify("Đã Export: " .. name, C.green)
         refreshFileList()
         CONFIG.LastArrayFile = name
@@ -1142,9 +1101,8 @@ fileActionBtn.Activated:Connect(function()
         notify("Chọn file trong danh sách để Import.", C.yellow)
     end
 end)
-local function openFileWindow(mode, contentOverride)
+local function openFileWindow(mode)
     fileMode = mode
-    exportContentOverride = mode == "export" and contentOverride or nil
     fileActionBtn.Text = mode == "export" and "Export Array" or "Làm mới danh sách"
     if mode == "export" then
         fileNameBox.Text = cleanFileName(fileNameBox.Text) or "Array1.txt"
@@ -1526,9 +1484,40 @@ nextBtn.Activated:Connect(function()
 end)
 
 ----------------------------------------------------------------
+-- XÁC NHẬN NHIỀU BƯỚC (Apply: 1 lần xác nhận, Xóa toàn bộ: 2 lần)
+----------------------------------------------------------------
+local confirmStates = {}
+local function requestConfirm(button, originalText, promptText, confirmationsNeeded, action)
+    local state = confirmStates[button]
+    if not state then
+        state = { count = 0, token = 0 }
+        confirmStates[button] = state
+    end
+    state.count += 1
+    state.token += 1
+    local token = state.token
+    if state.count <= confirmationsNeeded then
+        button.Text = promptText .. " " .. tostring(state.count) .. "/" .. tostring(confirmationsNeeded)
+        notify("Bấm lại để xác nhận (" .. tostring(state.count) .. "/" .. tostring(confirmationsNeeded) .. ").", C.yellow)
+        task.delay(5, function()
+            if confirmStates[button] == state and state.token == token then
+                state.count = 0
+                button.Text = originalText
+            end
+        end)
+        return false
+    end
+    state.count = 0
+    state.token += 1
+    button.Text = originalText
+    action()
+    return true
+end
+
+----------------------------------------------------------------
 -- LOGIC: ARRAY PANEL
 ----------------------------------------------------------------
-local function applyArrayEditorNow()
+local function performArrayApply()
     if isRunning then
         notify("Đang chạy, không thể Apply.", C.yellow)
         return
@@ -1562,12 +1551,27 @@ local function applyArrayEditorNow()
         notify("Đã Apply " .. #items .. " phần tử.", C.green)
     end
 end
+
 applyBtn.Activated:Connect(function()
-    askDoubleConfirm("Apply nội dung Array Editor", applyArrayEditorNow)
+    requestConfirm(applyBtn, "Apply", "Xác nhận", 1, performArrayApply)
 end)
 
 clearBtn.Activated:Connect(function()
-    editor.Text = "" -- tính là người dùng đã sửa: không tự ghi đè nữa cho tới khi Apply
+    requestConfirm(clearBtn, "Xóa", "Xác nhận xóa Array", 2, function()
+        if isRunning then
+            notify("Đang chạy, không thể xóa Array.", C.yellow)
+            return
+        end
+        BlockArray = { newItem() }
+        selected = BlockArray[1]
+        holding = nil
+        dirty = false
+        loadBoxes()
+        refreshAll()
+        setEditorText()
+        persistConfig()
+        notify("Đã xóa toàn bộ Array và tạo lại 1 vị trí mặc định.", C.green)
+    end)
 end)
 
 copyAllBtn.Activated:Connect(function()
@@ -1587,8 +1591,8 @@ end)
 ----------------------------------------------------------------
 -- LOGIC PLACE / RESIZE / MOVE
 ----------------------------------------------------------------
--- Phần màu của Block có thể tên "ColorPart" hoặc "Part"
-local COLOR_PART_NAMES = { "ColorPart", "Part" }
+-- Part dùng cho Place/Resize có thể tên "ColorPart", "Part" hoặc "Base" (InvisibleBlock).
+local COLOR_PART_NAMES = { "ColorPart", "Part", "Base" }
 local function findColorPart(block)
     if not block then return nil end
     for _, n in ipairs(COLOR_PART_NAMES) do
@@ -1676,7 +1680,7 @@ local function placeBlock(blockTemplate, cf)
         colorPart = findColorPart(block)
     end
     if not colorPart then
-        return nil, "Block '" .. block.Name .. "' không có 'ColorPart'"
+        return nil, "Block '" .. block.Name .. "' không có ColorPart/Part/Base"
     end
     return block, colorPart
 end
@@ -2146,13 +2150,13 @@ local row6 = selRow(6, 34)
 local pickBtn = selButton(row6, "Chọn nhiều Part", 0, 0.5, 12)
 local unpickBtn = selButton(row6, "Bỏ chọn tất cả", 0.5, 0.5, 18)
 local row7 = selRow(7, 34)
-local applySelectedBtn = selButton(row7, "Apply", 0, 0.68, 18)
-local optionsBtn = selButton(row7, "Options", 0.68, 0.32, 13)
-local rowExport = selRow(8, 32)
-local exportSelectedBtn = selButton(rowExport, "Export File", 0, 1, 14)
-local optionsFrame = mk("Frame", {LayoutOrder = 9, BackgroundColor3 = C.navy2, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 62), Visible = false}, right)
+local applySelectedBtn = selButton(row7, "Apply", 0, 0.5, 18)
+local optionsBtn = selButton(row7, "Options", 0.5, 0.25, 13)
+local exportPartsBtn = selButton(row7, "Xuất file", 0.75, 0.25, 12)
+local optionsFrame = mk("Frame", {LayoutOrder = 8, BackgroundColor3 = C.navy2, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 62), Visible = false}, right)
 local autoBlockMapping = true
 local copyPartMaterial = true
+local chooseTemplateForPart -- khai báo trước để nút Xuất file dùng được
 local function optionToggle(parent, y, label, getter)
     local b = mk("TextButton", {Position = UDim2.new(0, 3, 0, y), Size = UDim2.new(1, -6, 0, 26), BackgroundColor3 = C.peri, TextColor3 = C.ink, Font = Enum.Font.Arial, TextSize = 12, BorderSizePixel = 0}, parent)
     local function refresh() b.Text = label .. (getter() and ": BẬT" or ": TẮT") end
@@ -2163,8 +2167,36 @@ end
 optionToggle(optionsFrame, 3, "Tự nhận dạng Block", function() return autoBlockMapping end)
 optionToggle(optionsFrame, 32, "Sao chép Material", function() return copyPartMaterial end)
 optionsBtn.Activated:Connect(function() optionsFrame.Visible = not optionsFrame.Visible end)
+exportPartsBtn.Activated:Connect(function()
+    local items = {}
+    for _, part in ipairs(selectedBlocks) do
+        if part and part:IsA("BasePart") and part.Parent then
+            local cf, size = part.CFrame, part.Size
+            if cf and size then
+                local item = newItem(chooseTemplateForPart(part))
+                item.CF = cf
+                item.Resize = size
+                if copyPartMaterial then item.Material = part.Material end
+                items[#items + 1] = item
+            end
+        end
+    end
+    if #items == 0 then
+        notify("Hãy chọn ít nhất một Part hợp lệ trước khi Xuất file.", C.yellow)
+        return
+    end
+    local lines = {"local BlockArray = {"}
+    for i, item in ipairs(items) do
+        lines[#lines + 1] = entryText(i, item)
+        if i < #items then lines[#lines + 1] = "" end
+    end
+    lines[#lines + 1] = "}"
+    exportTextOverride = table.concat(lines, "\n")
+    fileNameBox.Text = "InspectorParts.txt"
+    openFileWindow("export")
+end)
 local multiCountLabel = mk("TextLabel", {
-    LayoutOrder = 10, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 18),
+    LayoutOrder = 9, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 18),
     Text = "Đã chọn: 0 Part", Font = Enum.Font.Arial, TextSize = 13, TextColor3 = C.yellow,
     TextXAlignment = Enum.TextXAlignment.Left,
 }, right)
@@ -2641,24 +2673,31 @@ end)
 local function basicBlockPath(name)
     return "ReplicatedStorage.Blocks.Basic." .. name .. "." .. name
 end
-local function chooseTemplateForPart(part)
+chooseTemplateForPart = function(part)
     if not part or not part:IsA("BasePart") or not autoBlockMapping then return DEFAULT_PATH end
-    -- Ưu tiên các thuộc tính đặc biệt trước hình dạng, sau đó mới dùng Block mặc định.
-    if part.CanCollide == false then return basicBlockPath("NoclipBlock") end
-    if part.CastShadow == true then return basicBlockPath("ShadowBlock") end
-    if part:IsA("Part") and part.Shape == Enum.PartType.Cylinder then
-        if part.Transparency > 0 then return basicBlockPath("TransparentBlock") end
-        return "ReplicatedStorage.Blocks.Events.InvisibleBlock.InvisibleBlock"
+
+    -- Tạm thời không tự nhận dạng NoclipBlock/ShadowBlock.
+    -- Chỉ Part dạng Block mới được thay bằng TransparentBlock/InvisibleBlock.
+    if part:IsA("Part") then
+        if part.Shape == Enum.PartType.Block then
+            if part.Transparency == 1 then
+                return "ReplicatedStorage.Blocks.Events.InvisibleBlock.InvisibleBlock"
+            elseif part.Transparency > 0 and part.Transparency < 1 then
+                return basicBlockPath("TransparentBlock")
+            end
+            return DEFAULT_PATH
+        elseif part.Shape == Enum.PartType.Ball then
+            return "ReplicatedStorage.Blocks.Basic.Sphere.Sphere"
+        elseif part.Shape == Enum.PartType.Cylinder then
+            return basicBlockPath("Cylinder")
+        end
     end
-    if part:IsA("Part") and part.Shape == Enum.PartType.Ball then
-        return 'ReplicatedStorage.Blocks.Basic.Sphere .Sphere '
-    end
+
     if part.Name == "Wedge" then return basicBlockPath("Wedge") end
-    if part:IsA("Part") and part.Shape == Enum.PartType.Block then return DEFAULT_PATH end
     return DEFAULT_PATH
 end
 
-local function applySelectedPartsNow()
+local function performApplySelected()
     if isRunning then
         notify("Không thể Apply khi Array đang chạy.", C.yellow)
         return
@@ -2686,42 +2725,9 @@ local function applySelectedPartsNow()
         notify("Hãy chọn ít nhất một Block hợp lệ trước khi Apply.", C.yellow)
     end
 end
-applySelectedBtn.Activated:Connect(function()
-    askDoubleConfirm("Apply các Part đã chọn vào Array", applySelectedPartsNow)
-end)
 
-local function buildSelectedPartsText()
-    local items = {}
-    for _, block in ipairs(selectedBlocks) do
-        if block and block:IsA("BasePart") and block.Parent then
-            local cf, size = blockInfo(block)
-            if cf and size then
-                local item = newItem(chooseTemplateForPart(block))
-                item.CF = cf
-                item.Resize = size
-                if copyPartMaterial then item.Material = block.Material end
-                items[#items + 1] = item
-            end
-        end
-    end
-    if #items == 0 then return nil end
-    local lines = {"local BlockArray = {"}
-    for i, item in ipairs(items) do
-        lines[#lines + 1] = entryText(i, item)
-        if i < #items then lines[#lines + 1] = "" end
-    end
-    lines[#lines + 1] = "}"
-    return table.concat(lines, "\n"), #items
-end
-exportSelectedBtn.Activated:Connect(function()
-    local content, count = buildSelectedPartsText()
-    if not content then
-        notify("Hãy chọn ít nhất một Part hợp lệ để Export File.", C.yellow)
-        return
-    end
-    fileNameBox.Text = "InspectorParts.txt"
-    openFileWindow("export", content)
-    notify("Sẵn sàng Export " .. count .. " Part đã chọn.", C.green)
+applySelectedBtn.Activated:Connect(function()
+    requestConfirm(applySelectedBtn, "Apply", "Xác nhận", 1, performApplySelected)
 end)
 
 hideHighlightsBtn.Activated:Connect(function()
