@@ -35,6 +35,9 @@ local CONFIG = {
     PartLimit = 150000,     -- số ký tự tối đa mỗi phần trong Array Editor (TextBox của Roblox giới hạn 200000)
     StageGap = 10,          -- khoảng cách giữa các Block đặt tạm (STAGE_GAP)
     StageHeight = 60,       -- độ cao đặt tạm phía trên (STAGE_HEIGHT)
+    HideList = false,       -- true: ẩn Danh sách ở cửa sổ Array Placement
+    MaxConcurrent = 40,     -- số lệnh gọi server chạy ĐỒNG THỜI tối đa (đợt lớn hơn sẽ xếp hàng, tránh Block bị bỏ lại ở vị trí tạm)
+    FinishRetries = 3,      -- số lần thử lại Move/Resize nếu Block chưa về đúng vị trí
     AutoLoadResizeGui = false, -- true: tự áp dụng kích thước GUI đã lưu khi khởi động script
     LastArrayFile = "",     -- file Array dùng gần nhất (Auto Load Config sẽ nạp lại file này)
     UISizes = {},           -- kích thước các cửa sổ: { TênCửaSổ = { Rộng, Cao } }
@@ -138,6 +141,8 @@ local function persistConfig(extra)
             ShowSearch = showSearch,
             StageGap = CONFIG.StageGap,
             StageHeight = CONFIG.StageHeight,
+            HideList = CONFIG.HideList == true,
+            MaxConcurrent = CONFIG.MaxConcurrent,
             AutoLoadResizeGui = CONFIG.AutoLoadResizeGui == true,
             LastArrayFile = CONFIG.LastArrayFile or "",
             UISizes = sizes,
@@ -414,6 +419,8 @@ if startupConfig then
     if tonumber(startupConfig.StageGap) then CONFIG.StageGap = math.clamp(tonumber(startupConfig.StageGap), 0, 1000) end
     if tonumber(startupConfig.StageHeight) then CONFIG.StageHeight = math.clamp(tonumber(startupConfig.StageHeight), 0, 5000) end
     if type(startupConfig.AutoLoadResizeGui) == "boolean" then CONFIG.AutoLoadResizeGui = startupConfig.AutoLoadResizeGui end
+    if type(startupConfig.HideList) == "boolean" then CONFIG.HideList = startupConfig.HideList end
+    if tonumber(startupConfig.MaxConcurrent) then CONFIG.MaxConcurrent = math.clamp(math.floor(tonumber(startupConfig.MaxConcurrent)), 1, 1000) end
     if type(startupConfig.LastArrayFile) == "string" then CONFIG.LastArrayFile = startupConfig.LastArrayFile end
     if type(startupConfig.SelectAnyPart) == "boolean" then CONFIG.SelectAnyPart = startupConfig.SelectAnyPart end
     if type(startupConfig.UISizes) == "table" then
@@ -665,8 +672,25 @@ buildText = function()
     return table.concat(lines, "\n")
 end
 
+-- Bản buildText có nhường luồng (dùng cho Array lớn: Export / Copy)
+local function buildTextAsync(onYield)
+    local n = #BlockArray
+    local lines = { "local BlockArray = {" }
+    local t0 = os.clock()
+    for i, it in ipairs(BlockArray) do
+        lines[#lines + 1] = entryText(i, it)
+        if i < n then lines[#lines + 1] = "" end
+        if onYield and os.clock() - t0 > 0.008 then
+            onYield(i, n)
+            t0 = os.clock()
+        end
+    end
+    lines[#lines + 1] = "}"
+    return table.concat(lines, "\n")
+end
+
 -- Đọc văn bản Array Panel -> danh sách phần tử mới
-local function parseArrayText(src)
+local function parseArrayText(src, onYield)
     src = (src:gsub("%-%-[^\n]*", "")) -- bỏ chú thích
     local outer = src:match("%b{}")
     if not outer then
@@ -681,7 +705,13 @@ local function parseArrayText(src)
     end
 
     local items = {}
+    local t0 = os.clock()
     for i, b in ipairs(blocks) do
+        -- File lớn: cứ ~8ms nhường luồng một lần để game không đứng hình
+        if onYield and os.clock() - t0 > 0.008 then
+            onYield(i, #blocks)
+            t0 = os.clock()
+        end
         local path = b:match('PathBlock%s*=%s*"(.-)"') or b:match("PathBlock%s*=%s*'(.-)'")
         if not path then
             return nil, string.format("Vị trí %d: thiếu PathBlock", i)
@@ -1110,14 +1140,13 @@ local listFrame = mk("ScrollingFrame", {
     Name = "List", BackgroundTransparency = 1, BorderSizePixel = 0,
     Position = UDim2.new(0, 6, 0, 30), Size = UDim2.new(1, -12, 0.5, -32),
     ScrollBarThickness = 4, ScrollingDirection = Enum.ScrollingDirection.Y,
-    CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    CanvasSize = UDim2.new(0, 0, 0, 0), -- đặt thủ công theo số phần tử (danh sách ảo hoá, chỉ dựng dòng đang thấy)
 }, mid)
-mk("UIListLayout", { Padding = UDim.new(0, ROW_GAP), SortOrder = Enum.SortOrder.LayoutOrder }, listFrame)
 
 -- Ẩn/hiện thanh tìm kiếm (chỉnh trong Cài đặt)
 showSearch = true
 local function applySearchVisibility()
-    searchBox.Visible = showSearch
+    searchBox.Visible = showSearch and not CONFIG.HideList
     listFrame.Position = showSearch and UDim2.new(0, 6, 0, 30) or UDim2.new(0, 6, 0, 0)
     listFrame.Size = showSearch and UDim2.new(1, -12, 0.5, -32) or UDim2.new(1, -12, 0.5, -2)
 end
@@ -1134,6 +1163,21 @@ mk("UIPadding", {
     PaddingTop = UDim.new(0, 2), PaddingBottom = UDim.new(0, 4),
 }, settings)
 mk("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, settings)
+
+-- Ẩn/hiện Danh sách: khi ẩn, phần nhập liệu (Settings) chiếm toàn bộ chiều cao
+local function applyListVisibility()
+    local hide = CONFIG.HideList == true
+    listFrame.Visible = not hide
+    searchBox.Visible = showSearch and not hide
+    if hide then
+        settings.Position = UDim2.new(0, 6, 0, 0)
+        settings.Size = UDim2.new(1, -12, 1, 0)
+    else
+        settings.Position = UDim2.new(0, 6, 0.5, 2)
+        settings.Size = UDim2.new(1, -12, 0.5, -2)
+    end
+end
+applyListVisibility()
 
 mk("TextLabel", {
     LayoutOrder = 0, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 26),
@@ -1195,6 +1239,8 @@ end
 local backBtn = navButton("<Trang Trước", 0, 0.27, C.peri, C.ink, false, 14)
 local nextBtn = navButton("Trang Kế Tiếp>", 0.285, 0.27, C.peri, C.ink, false, 14)
 local execBtn = navButton("Execute", 0.57, 0.43, C.peri, C.ink, false, 22)
+execBtn.TextScaled = true -- chữ tự co để hiện được "Đặt 45% (450/1000)"
+mk("UITextSizeConstraint", { MaxTextSize = 22, MinTextSize = 8 }, execBtn)
 
 ----------------------------------------------------------------
 -- GUI: ARRAY PANEL
@@ -1327,10 +1373,17 @@ end
 local function setFileSizeText(bytes, mode)
     fileSizeLabel.Text = "Kích cỡ file" .. (mode and (" (" .. mode .. ")") or "") .. ": " .. formatFileSize(bytes)
 end
+local fileButtons = {}
+local function highlightFile(name)
+    for n, btn in pairs(fileButtons) do
+        btn.BackgroundColor3 = (n == name) and C.rowSel or C.row
+    end
+end
 local function refreshFileList()
     for _, child in ipairs(fileList:GetChildren()) do
         if child:IsA("TextButton") or child:IsA("TextLabel") then child:Destroy() end
     end
+    for k in pairs(fileButtons) do fileButtons[k] = nil end
     local names = {}
     local ok, files = pcall(function() return listfiles(ROOT_FOLDER) end)
     if ok and type(files) == "table" then
@@ -1349,40 +1402,66 @@ local function refreshFileList()
             BackgroundColor3 = C.row, BorderSizePixel = 0, Text = "  " .. name,
             TextColor3 = C.text, Font = Enum.Font.Arial, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left}, fileList)
         mk("UICorner", {CornerRadius = UDim.new(0, 4)}, b)
+        fileButtons[name] = b
         b.Activated:Connect(function()
+            -- Chỉ CHỌN file; Import/Xóa chỉ chạy khi bấm nút ở dưới
             fileNameBox.Text = name
+            highlightFile(name)
             local okSizeRead, sizeContent = pcall(function() return readfile(ROOT_FOLDER .. "/" .. name) end)
-            if okSizeRead and type(sizeContent) == "string" then setFileSizeText(#sizeContent, fileMode == "import" and "Import" or "File đã chọn") end
-            if fileMode == "import" then
-                local okRead, content = pcall(function() return readfile(ROOT_FOLDER .. "/" .. name) end)
-                if not okRead then notify("Không đọc được file: " .. name, C.red) return end
-                setFileSizeText(#content, "Import")
-                local items, err = parseArrayText(content)
-                if not items then notify("Import lỗi: " .. tostring(err), C.red) return end
-                BlockArray = items
-                selected = items[1]
-                holding = nil
-                dirty = false
-                panelState.page = 1
-                loadBoxes()
-                refreshAll()
-                setEditorText()
-                CONFIG.LastArrayFile = name
-                persistConfig()
-                notify("Đã Import " .. name .. " (" .. #items .. " phần tử).", C.green)
-                toggleWin(fileWin)
+            if okSizeRead and type(sizeContent) == "string" then
+                setFileSizeText(#sizeContent, "File đã chọn")
             end
         end)
     end
+    highlightFile(cleanFileName(fileNameBox.Text))
 end
-local fileActionBtn = mk("TextButton", {Position = UDim2.new(0, 8, 1, -34), Size = UDim2.new(1, -16, 0, 28),
+
+local function doImport(name)
+    if isRunning then notify("Không thể Import khi Array đang chạy.", C.yellow) return end
+    if CONFIG.ImportBusy then notify("Đang Import file, vui lòng chờ.", C.yellow) return end
+    local okRead, content = pcall(function() return readfile(ROOT_FOLDER .. "/" .. name) end)
+    if not okRead or type(content) ~= "string" then notify("Không đọc được file: " .. name, C.red) return end
+    setFileSizeText(#content, "Import")
+    CONFIG.ImportBusy = true
+    local lastPct = -1
+    local okParse, items, err = pcall(parseArrayText, content, function(done, total)
+        local pct = math.floor(done / total * 100 / 10) * 10
+        if pct ~= lastPct then
+            lastPct = pct
+            notify(string.format("Đang đọc file... %d%%", pct), C.yellow)
+        end
+        task.wait()
+    end)
+    CONFIG.ImportBusy = false
+    if not okParse then notify("Import lỗi: " .. tostring(items), C.red) return end
+    if not items then notify("Import lỗi: " .. tostring(err), C.red) return end
+    BlockArray = items
+    selected = items[1]
+    holding = nil
+    dirty = false
+    panelState.page = 1
+    loadBoxes()
+    refreshAll()
+    setEditorText()
+    CONFIG.LastArrayFile = name
+    persistConfig()
+    notify("Đã Import " .. name .. " (" .. #items .. " phần tử).", C.green)
+    toggleWin(fileWin)
+end
+local fileActionBtn = mk("TextButton", {Position = UDim2.new(0, 8, 1, -34), Size = UDim2.new(0.62, -12, 0, 28),
     BackgroundColor3 = C.peri, BorderSizePixel = 0, TextColor3 = C.ink, Font = Enum.Font.ArialBold,
     TextSize = 14, Text = "Export Array"}, fileWin.body)
 fileActionBtn.Activated:Connect(function()
     local name = cleanFileName(fileNameBox.Text)
     if not name then notify("Nhập tên file trước.", C.yellow) return end
     if fileMode == "export" then
-        local contentToWrite = exportTextOverride or buildText()
+        if CONFIG.ExportBusy then notify("Đang Export, vui lòng chờ.", C.yellow) return end
+        CONFIG.ExportBusy = true
+        local okBuild, contentToWrite = pcall(function()
+            return exportTextOverride or buildTextAsync(function() task.wait() end)
+        end)
+        CONFIG.ExportBusy = false
+        if not okBuild then notify("Export lỗi: " .. tostring(contentToWrite), C.red) return end
         setFileSizeText(#contentToWrite, "Export dự kiến")
         local okWrite, err = pcall(function() writefile(ROOT_FOLDER .. "/" .. name, contentToWrite) end)
         if not okWrite then notify("Export lỗi: " .. tostring(err), C.red) return end
@@ -1393,17 +1472,106 @@ fileActionBtn.Activated:Connect(function()
         CONFIG.LastArrayFile = name
         persistConfig()
     else
-        refreshFileList()
-        notify("Chọn file trong danh sách để Import.", C.yellow)
+        -- Xác nhận Import file đã chọn
+        if not isfile(ROOT_FOLDER .. "/" .. name) then
+            notify("Hãy chọn một file trong danh sách trước.", C.yellow)
+            return
+        end
+        doImport(name)
     end
 end)
+do -- Nút "Xóa file" (cần xác nhận)
+    local fileDeleteBtn = mk("TextButton", {
+        Position = UDim2.new(0.62, 0, 1, -34), Size = UDim2.new(0.38, -8, 0, 28),
+        BackgroundColor3 = C.red, BorderSizePixel = 0, TextColor3 = C.text,
+        Font = Enum.Font.ArialBold, TextSize = 14, Text = "Xóa file",
+    }, fileWin.body)
+    local overlay = mk("Frame", {
+        Visible = false, Active = true, ZIndex = 30, BackgroundColor3 = Color3.new(0, 0, 0),
+        BackgroundTransparency = 0.4, BorderSizePixel = 0, Size = UDim2.new(1, 0, 1, 0),
+    }, fileWin.body)
+    local box = mk("Frame", {
+        ZIndex = 31, AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 0),
+        Size = UDim2.new(1, -24, 0, 120), BackgroundColor3 = C.navy, BorderSizePixel = 0,
+    }, overlay)
+    mk("UICorner", { CornerRadius = UDim.new(0, 6) }, box)
+    mk("UIStroke", { Color = C.peri, Thickness = 1 }, box)
+    local msg = mk("TextLabel", {
+        ZIndex = 31, BackgroundTransparency = 1, Position = UDim2.new(0, 8, 0, 8), Size = UDim2.new(1, -16, 0, 66),
+        Font = Enum.Font.Arial, TextSize = 14, TextWrapped = true, TextColor3 = C.text, Text = "",
+    }, box)
+    local yesBtn = mk("TextButton", {
+        ZIndex = 31, Position = UDim2.new(0, 8, 1, -40), Size = UDim2.new(0.5, -12, 0, 32),
+        BackgroundColor3 = C.red, BorderSizePixel = 0, TextColor3 = C.text,
+        Font = Enum.Font.ArialBold, TextSize = 14, Text = "Xóa",
+    }, box)
+    local noBtn = mk("TextButton", {
+        ZIndex = 31, Position = UDim2.new(0.5, 4, 1, -40), Size = UDim2.new(0.5, -12, 0, 32),
+        BackgroundColor3 = C.peri, BorderSizePixel = 0, TextColor3 = C.ink,
+        Font = Enum.Font.ArialBold, TextSize = 14, Text = "Hủy",
+    }, box)
+    fileWin.confirm = overlay
+    local pendingDelete = nil
+
+    fileDeleteBtn.Activated:Connect(function()
+        local name = cleanFileName(fileNameBox.Text)
+        if not name or not isfile(ROOT_FOLDER .. "/" .. name) then
+            notify("Hãy chọn file cần xóa trong danh sách.", C.yellow)
+            return
+        end
+        if typeof(delfile) ~= "function" then
+            notify("Executor không hỗ trợ delfile.", C.red)
+            return
+        end
+        pendingDelete = name
+        msg.Text = 'Xóa file "' .. name .. '"?\nThao tác này không thể hoàn tác.'
+        overlay.Visible = true
+    end)
+    noBtn.Activated:Connect(function()
+        pendingDelete = nil
+        overlay.Visible = false
+    end)
+    yesBtn.Activated:Connect(function()
+        local name = pendingDelete
+        pendingDelete = nil
+        overlay.Visible = false
+        if not name then return end
+        local okDel, errDel = pcall(delfile, ROOT_FOLDER .. "/" .. name)
+        if not okDel then
+            notify("Xóa lỗi: " .. tostring(errDel), C.red)
+            return
+        end
+        if CONFIG.LastArrayFile == name then
+            CONFIG.LastArrayFile = ""
+            persistConfig()
+        end
+        if cleanFileName(fileNameBox.Text) == name then fileNameBox.Text = "" end
+        fileSizeLabel.Text = "Kích cỡ file: —"
+        refreshFileList()
+        notify("Đã xóa file: " .. name, C.green)
+    end)
+end
+
 local function openFileWindow(mode)
     fileMode = mode
-    fileActionBtn.Text = mode == "export" and "Export Array" or "Làm mới danh sách"
+    fileActionBtn.Text = mode == "export" and "Export Array" or "Xác nhận Import"
+    if fileWin.confirm then fileWin.confirm.Visible = false end
     if mode == "export" then
         fileNameBox.Text = cleanFileName(fileNameBox.Text) or "Array1.txt"
-        local preview = exportTextOverride or buildText()
-        setFileSizeText(#preview, "Export dự kiến")
+        if exportTextOverride then
+            setFileSizeText(#exportTextOverride, "Export dự kiến")
+        else
+            -- Tính kích thước ở nền (không đứng hình khi Array lớn)
+            CONFIG.PreviewToken = (CONFIG.PreviewToken or 0) + 1
+            local tok = CONFIG.PreviewToken
+            setFileSizeText(0, "đang tính...")
+            task.spawn(function()
+                local okP, preview = pcall(buildTextAsync, function() task.wait() end)
+                if okP and tok == CONFIG.PreviewToken and fileWin.frame.Visible then
+                    setFileSizeText(#preview, "Export dự kiến")
+                end
+            end)
+        end
     else
         setFileSizeText(0, "chọn file")
     end
@@ -1413,62 +1581,60 @@ local function openFileWindow(mode)
 end
 exportBtn.Activated:Connect(function() openFileWindow("export") end)
 importBtn.Activated:Connect(function() openFileWindow("import") end)
-fileActionBtn.Activated:Connect(function()
-    if fileMode == "import" then refreshFileList() end
-end)
 
 -- Văn bản trong Panel tự đồng bộ với danh sách, trừ khi người dùng đang soạn dở
 local programmatic = false
 dirty = false
 -- Cắt Array thành nhiều phần (mỗi phần là một bảng { ... } hoàn chỉnh) để không vượt giới hạn 200000 ký tự.
-local function buildParts()
-    local texts = {}
-    for i, it in ipairs(BlockArray) do
-        texts[i] = entryText(i, it)
-    end
+-- Chia phần theo độ dài ƯỚC LƯỢNG (không dựng chuỗi cho cả Array), chỉ dựng văn bản của phần đang xem.
+local function computeRanges()
     local ranges, first, size = {}, 1, 0
-    for i = 1, #texts do
-        local len = #texts[i] + 2
+    for i, it in ipairs(BlockArray) do
+        local len = 560 + #(it.PathBlock or "") -- cận trên độ dài entryText
         if size + len > CONFIG.PartLimit and i > first then
             ranges[#ranges + 1] = { first, i - 1 }
             first, size = i, 0
         end
         size = size + len
     end
-    ranges[#ranges + 1] = { first, #texts }
+    ranges[#ranges + 1] = { first, #BlockArray }
+    return ranges
+end
 
-    local parts, n = {}, #ranges
-    for p, r in ipairs(ranges) do
-        local lines = {}
-        if n > 1 then
-            lines[#lines + 1] = string.format(
-                "-- PHẦN %d/%d (vị trí %d - %d). Sửa xong bấm Apply: chỉ thay đúng phần này.", p, n, r[1], r[2])
-        end
-        lines[#lines + 1] = "local BlockArray = {"
-        for i = r[1], r[2] do
-            lines[#lines + 1] = texts[i]
-            if i < r[2] then lines[#lines + 1] = "" end
-        end
-        lines[#lines + 1] = "}"
-        parts[p] = { text = table.concat(lines, "\n"), from = r[1], to = r[2] }
+local function buildPartText(page, total, r)
+    local lines = {}
+    if total > 1 then
+        lines[#lines + 1] = string.format(
+            "-- PHẦN %d/%d (vị trí %d - %d). Sửa xong bấm Apply: chỉ thay đúng phần này.", page, total, r[1], r[2])
     end
-    return parts
+    lines[#lines + 1] = "local BlockArray = {"
+    for i = r[1], r[2] do
+        lines[#lines + 1] = entryText(i, BlockArray[i])
+        if i < r[2] then lines[#lines + 1] = "" end
+    end
+    lines[#lines + 1] = "}"
+    return table.concat(lines, "\n")
 end
 
 -- Hiển thị phần hiện tại của Array trong Editor. Không bao giờ ném lỗi (để Execute/Apply không bị chặn).
 setEditorText = function()
-    local okBuild, parts = pcall(buildParts)
-    if not okBuild or not parts or #parts == 0 then
-        warn("[ArrayPlacementTool] Không dựng được văn bản Array: " .. tostring(parts))
+    local okR, ranges = pcall(computeRanges)
+    if not okR or not ranges or #ranges == 0 then
+        warn("[ArrayPlacementTool] Không chia được phần Array: " .. tostring(ranges))
         return
     end
-    panelState.total = #parts
-    panelState.page = math.clamp(panelState.page, 1, #parts)
-    local part = parts[panelState.page]
-    panelState.from, panelState.to = part.from, part.to
+    panelState.total = #ranges
+    panelState.page = math.clamp(panelState.page, 1, #ranges)
+    local r = ranges[panelState.page]
+    panelState.from, panelState.to = r[1], r[2]
+    local okT, text = pcall(buildPartText, panelState.page, #ranges, r)
+    if not okT then
+        warn("[ArrayPlacementTool] Không dựng được văn bản Array: " .. tostring(text))
+        return
+    end
 
     programmatic = true
-    local okSet, setErr = pcall(function() editor.Text = part.text end)
+    local okSet, setErr = pcall(function() editor.Text = text end)
     if not okSet then
         warn("[ArrayPlacementTool] Không gán được Text cho Editor: " .. tostring(setErr))
         pcall(function() editor.Text = "-- Phần này quá dài để hiển thị. Hãy dùng Export/Copy." end)
@@ -1503,7 +1669,10 @@ end
 -- LOGIC: DANH SÁCH
 ----------------------------------------------------------------
 local selectItem, deleteItem
-local rowCache = {}
+-- Danh sách ảo hoá: chỉ tạo/gán dữ liệu cho các dòng đang nhìn thấy (file lớn không còn lag).
+local listState = { pool = {}, filtered = nil, total = 0, first = 0, last = -1 }
+local ROW_STRIDE = ROW_H + ROW_GAP
+local ROW_BUFFER = 3
 
 local function statusColor(s)
     if s == "run" then return C.yellow end
@@ -1512,7 +1681,7 @@ local function statusColor(s)
     return C.dark
 end
 
-local function createRow(it)
+local function createRow()
     local row = mk("TextButton", {
         Name = "Row", AutoButtonColor = false, Text = "", BorderSizePixel = 0,
         BackgroundColor3 = C.row, Size = UDim2.new(1, -6, 0, ROW_H),
@@ -1566,9 +1735,12 @@ local function createRow(it)
     local delB = small("Xóa", 33, 2)
     r.hold = small("Giữ", 33, 3)
 
-    row.Activated:Connect(function() selectItem(it) end)
-    delB.Activated:Connect(function() deleteItem(it) end)
+    -- Dòng được tái sử dụng cho nhiều phần tử: luôn đọc phần tử hiện tại từ r.item
+    row.Activated:Connect(function() if r.item then selectItem(r.item) end end)
+    delB.Activated:Connect(function() if r.item then deleteItem(r.item) end end)
     copyB.Activated:Connect(function()
+        local it = r.item
+        if not it then return end
         local text = entryText(indexOf(it) or 0, it)
         if copyText(text) then
             notify("Đã copy Block #" .. tostring(indexOf(it)) .. ".", C.green)
@@ -1580,6 +1752,8 @@ local function createRow(it)
     -- Giữ + kéo lên/xuống để đổi thứ tự
     r.hold.InputBegan:Connect(function(input)
         if isRunning or not isPress(input) then return end
+        local it = r.item
+        if not it then return end
         local startIdx = indexOf(it)
         if not startIdx then return end
         holding = it
@@ -1601,54 +1775,76 @@ local function createRow(it)
         end)
     end)
 
-    rowCache[it] = r
     return r
 end
 
-local function refreshList()
-    local present = {}
-    for _, it in ipairs(BlockArray) do
-        present[it] = true
-    end
-    for it, r in pairs(rowCache) do
-        if not present[it] then
-            r.frame:Destroy()
-            rowCache[it] = nil
-        end
-    end
+local function renderRows(force)
+    local viewH = math.max(listFrame.AbsoluteSize.Y, ROW_STRIDE)
+    local pos = listFrame.CanvasPosition.Y
+    local first = math.max(1, math.floor(pos / ROW_STRIDE) + 1 - ROW_BUFFER)
+    local last = math.min(listState.total, math.ceil((pos + viewH) / ROW_STRIDE) + ROW_BUFFER)
+    if not force and first == listState.first and last == listState.last then return end
+    listState.first, listState.last = first, last
 
-    local query = string.lower(trim(searchBox and searchBox.Text or ""))
-    local visibleOrder = 0
-    for i, it in ipairs(BlockArray) do
-        local r = rowCache[it] or createRow(it)
-        local vecText = textCFFull(it.CF)
-        local sizeText = textVec(it.Resize)
-        local matches = query == "" or string.find(string.lower(vecText), query, 1, true)
-            or string.find(string.lower(sizeText), query, 1, true)
-            or string.find(string.lower("block " .. i), query, 1, true)
-        r.frame.Visible = not not matches
-        if matches then
-            visibleOrder += 1
-            r.frame.LayoutOrder = visibleOrder
-        else
-            r.frame.LayoutOrder = i + #BlockArray
+    local pool, filtered = listState.pool, listState.filtered
+    local need = math.max(0, last - first + 1)
+    for k = 1, need do
+        local r = pool[k]
+        if not r then
+            r = createRow()
+            pool[k] = r
         end
-        r.frame.BackgroundColor3 = (it == selected) and C.rowSel or C.row
-        r.idx.Text = tostring(i)
-        r.title.Text = "Block #" .. i
-        r.vec.Text = vecText
-        r.size.Text = "Size " .. sizeText
-        r.status.Text = (it == selected) and "⬢" or "⬡"
-        r.status.TextColor3 = (it == selected) and C.yellow or statusColor(it.Status)
-        r.hold.BackgroundColor3 = (it == holding) and C.peri or C.dark
-        r.hold.TextColor3 = (it == holding) and C.ink or C.text
+        local fi = first + k - 1
+        local i = filtered and filtered[fi] or fi
+        local it = BlockArray[i]
+        r.item = it
+        r.frame.Position = UDim2.new(0, 0, 0, (fi - 1) * ROW_STRIDE)
+        r.frame.Visible = true
+        if it then
+            r.frame.BackgroundColor3 = (it == selected) and C.rowSel or C.row
+            r.idx.Text = tostring(i)
+            r.title.Text = "Block #" .. i
+            r.vec.Text = textCFFull(it.CF)
+            r.size.Text = "Size " .. textVec(it.Resize)
+            r.status.Text = (it == selected) and "⬢" or "⬡"
+            r.status.TextColor3 = (it == selected) and C.yellow or statusColor(it.Status)
+            r.hold.BackgroundColor3 = (it == holding) and C.peri or C.dark
+            r.hold.TextColor3 = (it == holding) and C.ink or C.text
+        end
     end
+    for k = need + 1, #pool do
+        pool[k].frame.Visible = false
+        pool[k].item = nil
+    end
+end
+
+local function refreshList()
+    local query = string.lower(trim(searchBox and searchBox.Text or ""))
+    if query == "" then
+        listState.filtered = nil
+        listState.total = #BlockArray
+    else
+        local f = {}
+        for i, it in ipairs(BlockArray) do
+            local matches = string.find(string.lower(textCFFull(it.CF)), query, 1, true)
+                or string.find(string.lower(textVec(it.Resize)), query, 1, true)
+                or string.find(string.lower("block " .. i), query, 1, true)
+            if matches then f[#f + 1] = i end
+        end
+        listState.filtered = f
+        listState.total = #f
+    end
+    listFrame.CanvasSize = UDim2.new(0, 0, 0, math.max(0, listState.total * ROW_STRIDE - ROW_GAP))
+    renderRows(true)
 
     countLabel.Text = "(" .. #BlockArray .. ")"
     local si = indexOf(selected) or 1
     backBtn.BackgroundTransparency = (si <= 1) and 0.6 or 0
     nextBtn.BackgroundTransparency = (si >= #BlockArray) and 0.6 or 0
 end
+
+listFrame:GetPropertyChangedSignal("CanvasPosition"):Connect(function() renderRows(false) end)
+listFrame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function() renderRows(true) end)
 
 loadBoxes = function()
     if not selected then return end
@@ -1668,7 +1864,15 @@ local function ensureVisible()
     task.delay(0.05, function()
         local i = indexOf(selected)
         if not i then return end
-        local top = (i - 1) * (ROW_H + ROW_GAP)
+        local fi = i
+        if listState.filtered then
+            fi = nil
+            for k, idx in ipairs(listState.filtered) do
+                if idx == i then fi = k break end
+            end
+            if not fi then return end
+        end
+        local top = (fi - 1) * (ROW_H + ROW_GAP)
         local bottom = top + ROW_H
         local pos = listFrame.CanvasPosition.Y
         local view = listFrame.AbsoluteSize.Y
@@ -1689,8 +1893,13 @@ refreshAll = function()
     end
 end
 
+local searchToken = 0
 searchBox:GetPropertyChangedSignal("Text"):Connect(function()
-    refreshList()
+    searchToken += 1
+    local my = searchToken
+    task.delay(0.2, function() -- gõ xong mới lọc, tránh lọc cả nghìn phần tử mỗi phím
+        if my == searchToken then refreshList() end
+    end)
 end)
 
 -- Lưu nội dung 3 Textbox vào phần tử đang chọn. Trả về true nếu cả 3 hợp lệ.
@@ -1920,9 +2129,16 @@ end)
 
 copyAllBtn.Activated:Connect(function()
     -- Copy luôn dữ liệu Array hiện tại, không copy phần văn bản người dùng đang soạn dở.
-    local arrayValue = buildText()
     if #BlockArray == 0 then
         notify("Array đang trống.", C.yellow)
+        return
+    end
+    if CONFIG.CopyBusy then notify("Đang chuẩn bị dữ liệu để copy...", C.yellow) return end
+    CONFIG.CopyBusy = true
+    local okCopy, arrayValue = pcall(buildTextAsync, function() task.wait() end)
+    CONFIG.CopyBusy = false
+    if not okCopy then
+        notify("Copy lỗi: " .. tostring(arrayValue), C.red)
         return
     end
     if copyText(arrayValue) then
@@ -2145,6 +2361,73 @@ local function setLocked(locked)
     execBtn.BackgroundTransparency = locked and 0.5 or 0
 end
 
+-- Chạy fn(job) cho từng job nhưng chỉ cho tối đa `limit` lệnh chạy cùng lúc (các job còn lại xếp hàng).
+-- Chờ đến khi xong hết; nếu quá `idleTimeout` giây mà không job nào hoàn thành thì bỏ chờ.
+local function runPool(jobs, limit, fn, idleTimeout)
+    local n = #jobs
+    if n == 0 then return true end
+    limit = math.clamp(math.floor(tonumber(limit) or 1), 1, n)
+    local nextIdx, active = 1, 0
+    local lastProgress = os.clock()
+    for _ = 1, limit do
+        active += 1
+        task.spawn(function()
+            while true do
+                local i = nextIdx
+                if i > n then break end
+                nextIdx = i + 1
+                local okF, errF = pcall(fn, jobs[i])
+                if not okF and jobs[i].Err == nil then jobs[i].Err = tostring(errF) end
+                lastProgress = os.clock()
+            end
+            active -= 1
+        end)
+    end
+    while active > 0 do
+        task.wait(0.05)
+        if os.clock() - lastProgress > (idleTimeout or 10) then return false end
+    end
+    return true
+end
+
+-- Block còn ở vị trí đặt tạm (phiêu) thay vì ở đích?  Job đầu tiên đặt ngay tại đích nên luôn hợp lệ.
+local function blockSettled(job)
+    local block = job.Block
+    if not (block and block.Parent) then return false end
+    local cp = job.ColorPart
+    if not (cp and cp.Parent) then
+        cp = findColorPart(block)
+        job.ColorPart = cp
+    end
+    if not cp then return false end
+    if (job.PlaceCF.Position - job.CF.Position).Magnitude < 1 then return true end
+    local dStage = (cp.Position - job.PlaceCF.Position).Magnitude
+    local dTarget = (cp.Position - job.CF.Position).Magnitude
+    return dTarget < dStage
+end
+
+-- Đưa Block về đích + đặt kích thước; kiểm tra lại và thử lại nếu Block chưa về đúng chỗ.
+local function finishJob(job)
+    local tries = math.max(1, math.floor(tonumber(CONFIG.FinishRetries) or 1))
+    local lastErr = "Block chưa về đúng vị trí"
+    for attempt = 1, tries do
+        local ok, err = moveBlock(job.Block, job.CF)
+        if ok then
+            ok, err = resizeBlock(job.Block, job.ColorPart, job.CF, job.Resize)
+        end
+        if ok then
+            task.wait(0.1) -- chờ server cập nhật vị trí rồi mới kiểm tra
+            if blockSettled(job) then return true end
+            lastErr = string.format("Block chưa về đúng vị trí (thử %d/%d)", attempt, tries)
+        else
+            lastErr = err
+            if not (job.Block and job.Block.Parent) then break end
+        end
+        task.wait(0.2 * attempt)
+    end
+    return false, lastErr
+end
+
 -- Đặt nhiều Block cùng lúc. Mỗi job nhận lại đúng Block của mình:
 -- ưu tiên Instance server trả về; nếu không có thì ghép với Block mới có ColorPart gần PlaceCF nhất.
 local function placeBatch(batch)
@@ -2168,31 +2451,21 @@ local function placeBatch(batch)
         end
     end)
 
-    local pending = #batch
-    for _, job in ipairs(batch) do
-        task.spawn(function()
-            local ok, ret = pcall(function()
-                return remote:InvokeServer(
-                    job.Template, job.PlaceCF,
-                    getItemBrickColor(job.Item), (job.Item and job.Item.Material) or CONFIG.BlockMaterial
-                )
-            end)
-            if not ok then
-                job.Err = "PlaceBlock lỗi: " .. tostring(ret)
-            elseif ret == false then
-                job.Err = "Server từ chối PlaceBlock"
-            elseif typeof(ret) == "Instance" and ret.Parent then
-                job.Returned = ret
-            end
-            pending -= 1
+    runPool(batch, CONFIG.MaxConcurrent, function(job)
+        local ok, ret = pcall(function()
+            return remote:InvokeServer(
+                job.Template, job.PlaceCF,
+                getItemBrickColor(job.Item), (job.Item and job.Item.Material) or CONFIG.BlockMaterial
+            )
         end)
-    end
-
-    local waited = 0
-    while pending > 0 and waited < CONFIG.PlaceWaitTimeout do
-        task.wait(0.05)
-        waited += 0.05
-    end
+        if not ok then
+            job.Err = "PlaceBlock lỗi: " .. tostring(ret)
+        elseif ret == false then
+            job.Err = "Server từ chối PlaceBlock"
+        elseif typeof(ret) == "Instance" and ret.Parent then
+            job.Returned = ret
+        end
+    end, CONFIG.PlaceWaitTimeout)
     task.wait(CONFIG.SettleTime)
     conn:Disconnect()
 
@@ -2292,13 +2565,16 @@ execBtn.Activated:Connect(function()
         end
         local placed = {}
         local stop = false
+        local function pctOf(done, all)
+            return all > 0 and math.floor(done / all * 100) or 100
+        end
         for startIdx = 1, total, batchSize do
             local batch = {}
             for i = startIdx, math.min(startIdx + batchSize - 1, total) do
                 batch[#batch + 1] = snapshot[i]
                 snapshot[i].Item.Status = "run"
             end
-            execBtn.Text = string.format("Đang đặt %d/%d", startIdx, total)
+            execBtn.Text = string.format("Đặt %d%% (%d/%d)", pctOf(startIdx - 1, total), startIdx - 1, total)
             refreshList()
 
             placeBatch(batch)
@@ -2314,6 +2590,8 @@ execBtn.Activated:Connect(function()
                     placed[#placed + 1] = job
                 end
             end
+            local doneN = math.min(startIdx + batchSize - 1, total)
+            execBtn.Text = string.format("Đặt %d%% (%d/%d)", pctOf(doneN, total), doneN, total)
             refreshList()
             if stop then break end
             task.wait(CONFIG.StepDelay)
@@ -2325,21 +2603,15 @@ execBtn.Activated:Connect(function()
             for i = startIdx, math.min(startIdx + batchSize - 1, #placed) do
                 batch[#batch + 1] = placed[i]
             end
-            execBtn.Text = string.format("Đang hoàn tất %d/%d", startIdx, #placed)
+            execBtn.Text = string.format("Hoàn tất %d%% (%d/%d)", pctOf(startIdx - 1, #placed), startIdx - 1, #placed)
 
-            local pending = #batch
+            runPool(batch, CONFIG.MaxConcurrent, function(job)
+                job.StepOk, job.StepErr = finishJob(job)
+            end, 20)
             for _, job in ipairs(batch) do
-                task.spawn(function()
-                    local stepOk, stepErr = moveBlock(job.Block, job.CF)
-                    if stepOk then
-                        stepOk, stepErr = resizeBlock(job.Block, job.ColorPart, job.CF, job.Resize)
-                    end
-                    job.StepOk, job.StepErr = stepOk, stepErr
-                    pending -= 1
-                end)
-            end
-            while pending > 0 do
-                task.wait(0.05)
+                if job.StepOk == nil then
+                    job.StepOk, job.StepErr = false, "Quá thời gian chờ khi đưa Block về đích"
+                end
             end
 
             for _, job in ipairs(batch) do
@@ -2353,8 +2625,30 @@ execBtn.Activated:Connect(function()
                     warn("[BlockArrayTool] Vị trí " .. job.Index .. " lỗi khi hoàn tất: " .. tostring(job.StepErr))
                 end
             end
+            local doneF = math.min(startIdx + batchSize - 1, #placed)
+            execBtn.Text = string.format("Hoàn tất %d%% (%d/%d)", pctOf(doneF, #placed), doneF, #placed)
             refreshList()
             task.wait(CONFIG.StepDelay)
+        end
+
+        -- Quét cuối: Block nào vẫn còn ở vị trí tạm (phiêu) thì Move/Resize lại
+        local stuck = {}
+        for _, job in ipairs(placed) do
+            if job.StepOk and not blockSettled(job) then stuck[#stuck + 1] = job end
+        end
+        if #stuck > 0 then
+            execBtn.Text = string.format("Sửa %d Block phiêu...", #stuck)
+            runPool(stuck, CONFIG.MaxConcurrent, function(job)
+                job.StepOk, job.StepErr = finishJob(job)
+            end, 20)
+            for _, job in ipairs(stuck) do
+                if not job.StepOk then
+                    success = success - 1
+                    failed = failed + 1
+                    job.Item.Status = "fail"
+                    errors[#errors + 1] = string.format("#%d: %s", job.Index, tostring(job.StepErr))
+                end
+            end
         end
 
         setLocked(false)
@@ -2497,14 +2791,7 @@ local row7 = selRow(7, 34)
 local applySelectedBtn = selButton(row7, "Apply", 0, 0.5, 18)
 local optionsBtn = selButton(row7, "Options", 0.5, 0.25, 13)
 local exportPartsBtn = selButton(row7, "Xuất file", 0.75, 0.25, 12)
-local dragControlRow = selRow(8, 30)
-local pauseDragBtn = selButton(dragControlRow, "Tạm dừng kéo vùng", 0, 1, 13)
 local optionsFrame = mk("Frame", {LayoutOrder = 9, BackgroundColor3 = C.navy2, BorderSizePixel = 0, Size = UDim2.new(1, 0, 0, 134), Visible = false}, right)
-local autoFormatColorBtn = mk("TextButton", {
-    Position = UDim2.new(0, 3, 0, 58), Size = UDim2.new(1, -6, 0, 26),
-    BackgroundColor3 = C.peri, TextColor3 = C.ink, Text = "Tự động định dạng Màu",
-    Font = Enum.Font.Arial, TextSize = 12, BorderSizePixel = 0,
-}, optionsFrame)
 
 -- Hàng đợi Apply của inspector Parts: xử lý theo đợt, có tiến trình và Cancel.
 local inspectorQueue = {
@@ -2542,16 +2829,18 @@ inspectorQueue.cancelButton.Activated:Connect(function()
 end)
 local autoBlockMapping = true
 local copyPartMaterial = true
+local autoFormatColor = true -- tự định dạng Màu theo palette (giống tự nhận dạng Block)
 local chooseTemplateForPart -- khai báo trước để nút Xuất file dùng được
-local function optionToggle(parent, y, label, getter)
+local function optionToggle(parent, y, label, getter, setter)
     local b = mk("TextButton", {Position = UDim2.new(0, 3, 0, y), Size = UDim2.new(1, -6, 0, 26), BackgroundColor3 = C.peri, TextColor3 = C.ink, Font = Enum.Font.Arial, TextSize = 12, BorderSizePixel = 0}, parent)
     local function refresh() b.Text = label .. (getter() and ": BẬT" or ": TẮT") end
-    b.Activated:Connect(function() if label == "Tự nhận dạng Block" then autoBlockMapping = not autoBlockMapping else copyPartMaterial = not copyPartMaterial end refresh() end)
+    b.Activated:Connect(function() setter(not getter()) refresh() end)
     refresh()
     return b
 end
-optionToggle(optionsFrame, 3, "Tự nhận dạng Block", function() return autoBlockMapping end)
-optionToggle(optionsFrame, 32, "Sao chép Material", function() return copyPartMaterial end)
+optionToggle(optionsFrame, 3, "Tự nhận dạng Block", function() return autoBlockMapping end, function(v) autoBlockMapping = v end)
+optionToggle(optionsFrame, 32, "Sao chép Material", function() return copyPartMaterial end, function(v) copyPartMaterial = v end)
+optionToggle(optionsFrame, 58, "Tự định dạng Màu", function() return autoFormatColor end, function(v) autoFormatColor = v end)
 mk("TextLabel", {
     Position = UDim2.new(0, 4, 0, 87), Size = UDim2.new(0.49, -4, 0, 14),
     BackgroundTransparency = 1, Text = "batchSize (1–500)", TextColor3 = C.text,
@@ -2607,7 +2896,7 @@ exportPartsBtn.Activated:Connect(function()
                 item.CF = cf
                 item.Resize = size
                 if copyPartMaterial then item.Material = part.Material end
-                item.ColorRGB = nearestPaletteColor(part.Color)
+                if autoFormatColor then item.ColorRGB = nearestPaletteColor(part.Color) end
                 items[#items + 1] = item
             end
         end
@@ -2625,44 +2914,6 @@ exportPartsBtn.Activated:Connect(function()
     exportTextOverride = table.concat(lines, "\n")
     fileNameBox.Text = "InspectorParts.txt"
     openFileWindow("export")
-end)
-autoFormatColorBtn.Activated:Connect(function()
-    if inspectorQueue.running or dragScanRunning then
-        notify("Hãy đợi tác vụ hiện tại hoàn tất.", C.yellow)
-        return
-    end
-    local targets = {}
-    for _, part in ipairs(selectedBlocks) do
-        if part and part:IsA("BasePart") and part.Parent then targets[#targets + 1] = part end
-    end
-    if #targets == 0 then
-        notify("Hãy chọn ít nhất một Part để định dạng màu.", C.yellow)
-        return
-    end
-    task.spawn(function()
-        -- Snapshot settings at task start: editing TextBox won't desync progress mid-run.
-        local batchSize = math.clamp(math.floor(tonumber(inspectorQueue.batchSize) or 50), 1, 500)
-        local batchDelay = math.clamp(tonumber(inspectorQueue.batchDelay) or 0.03, 0, 1)
-        local changed, total = 0, #targets
-        for startIndex = 1, total, batchSize do
-            if not alive then break end
-            local endIndex = math.min(startIndex + batchSize - 1, total)
-            for i = startIndex, endIndex do
-                local part = targets[i]
-                if part and part.Parent then
-                    local palette = nearestPaletteColor(part.Color)
-                    if palette then
-                        local ok = pcall(function() part.Color = Color3.fromRGB(palette.R, palette.G, palette.B) end)
-                        if ok then changed += 1 end
-                    end
-                end
-            end
-            inspectorQueue.progressLabel.Text = string.format("Định dạng màu: %d/%d", endIndex, total)
-            if endIndex < total then task.wait(batchDelay) end
-        end
-        inspectorQueue.progressLabel.Text = "Sẵn sàng"
-        notify(string.format("Đã định dạng màu gần nhất cho %d/%d Part theo palette.", changed, total), C.green)
-    end)
 end)
 local multiCountLabel = mk("TextLabel", {
     LayoutOrder = 11, BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 18),
@@ -2894,19 +3145,14 @@ local function setPicking(on)
 end
 
 local bindDragSelect
-local dragPaused = false
 local function setDragSelectMode(on)
     dragSelectMode = on
     if on then
         picking = true
         pickBtn.Text = "Kéo vùng chọn"
         pickBtn.BackgroundColor3 = C.yellow
-        pauseDragBtn.Text = dragPaused and "Tiếp tục kéo vùng" or "Tạm dừng kéo vùng"
         bindDragSelect()
     else
-        dragPaused = false
-        pauseDragBtn.Text = "Tạm dừng kéo vùng"
-        pauseDragBtn.BackgroundColor3 = C.peri
         pickBtn.Text = picking and "Đang chọn (chạm)" or "Select"
         pickBtn.BackgroundColor3 = picking and C.yellow or C.peri
         dragSelecting = false
@@ -3255,32 +3501,10 @@ local function dragSelectAction(_, state, input)
 end
 
 bindDragSelect = function()
-    if dragPaused then return end
     ContextActionService:BindActionAtPriority("BlockArray_DragSelect", dragSelectAction, false,
         Enum.ContextActionPriority.High.Value, Enum.UserInputType.MouseButton1,
         Enum.UserInputType.MouseMovement, Enum.UserInputType.Touch)
 end
-
-pauseDragBtn.Activated:Connect(function()
-    if not dragSelectMode then
-        notify("Bật chế độ Kéo vùng chọn trước.", C.yellow)
-        return
-    end
-    dragPaused = not dragPaused
-    if dragPaused then
-        dragSelecting = false
-        if dragRect then dragRect.Visible = false end
-        ContextActionService:UnbindAction("BlockArray_DragSelect")
-        pauseDragBtn.Text = "Tiếp tục kéo vùng"
-        pauseDragBtn.BackgroundColor3 = C.yellow
-        notify("Đã tạm dừng kéo vùng.", C.yellow)
-    else
-        bindDragSelect()
-        pauseDragBtn.Text = "Tạm dừng kéo vùng"
-        pauseDragBtn.BackgroundColor3 = C.peri
-        notify("Đã bật lại kéo vùng.", C.green)
-    end
-end)
 
 unpickBtn.Activated:Connect(function()
     setPicking(false)
@@ -3374,7 +3598,7 @@ local function performApplySelected()
                     item.CF = cf
                     item.Resize = size
                     if copyPartMaterial then item.Material = block.Material end
-                    item.ColorRGB = nearestPaletteColor(block.Color)
+                    if autoFormatColor then item.ColorRGB = nearestPaletteColor(block.Color) end
                     return item
                 end)
                 if ok and itemOrError then
@@ -3612,6 +3836,7 @@ do -- Cài đặt mới: STAGE_GAP, STAGE_HEIGHT, tự load Resize GUI
     end
     numberSetting(10, "Khoảng cách Block tạm - STAGE_GAP (0 - 1000)", "StageGap", 0, 1000, "Đã đổi STAGE_GAP: ")
     numberSetting(12, "Độ cao Block tạm - STAGE_HEIGHT (0 - 5000)", "StageHeight", 0, 5000, "Đã đổi STAGE_HEIGHT: ")
+    numberSetting(16, "Giới hạn gọi server cùng lúc (1 - 1000)", "MaxConcurrent", 1, 1000, "Đã đổi giới hạn đồng thời: ")
 
     local anyPartToggle = mk("TextButton", {
         LayoutOrder = 14, Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.peri, TextColor3 = C.ink,
@@ -3628,6 +3853,22 @@ do -- Cài đặt mới: STAGE_GAP, STAGE_HEIGHT, tự load Resize GUI
         notify(CONFIG.SelectAnyPart
             and "Kéo vùng / chạm chọn được MỌI Part (trừ nhân vật của bạn)."
             or "Chỉ chọn Part có tên Part/ColorPart.", C.green)
+    end)
+
+    local hideListToggle = mk("TextButton", {
+        LayoutOrder = 15, Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.peri, TextColor3 = C.ink,
+        Font = Enum.Font.ArialBold, TextSize = 14, BorderSizePixel = 0, Text = "",
+    }, sList)
+    local function refreshHideListToggle()
+        hideListToggle.Text = "Ẩn Danh sách: " .. (CONFIG.HideList and "BẬT" or "TẮT")
+    end
+    refreshHideListToggle()
+    hideListToggle.Activated:Connect(function()
+        CONFIG.HideList = not CONFIG.HideList
+        refreshHideListToggle()
+        applyListVisibility()
+        persistConfig()
+        notify(CONFIG.HideList and "Đã ẩn Danh sách." or "Đã hiện Danh sách.", C.green)
     end)
 
     local resizeToggle = mk("TextButton", {
@@ -3653,19 +3894,31 @@ end
 ----------------------------------------------------------------
 -- Config không còn lưu nội dung Array (làm Config nặng). Nếu Auto Load Config bật,
 -- nạp lại file Array dùng gần nhất (Import/Export) trong thư mục ArrayPlacementTool.
-if autoLoadConfig and CONFIG.LastArrayFile ~= "" and not CONFIG.LastArrayFile:find("[/\\]") then
-    local okRead, content = pcall(readfile, ROOT_FOLDER .. "/" .. CONFIG.LastArrayFile)
-    if okRead and type(content) == "string" then
-        local loadedItems, loadErr = parseArrayText(content)
-        if loadedItems then
-            BlockArray = loadedItems
-            selected = BlockArray[1]
-        else
-            warn("[ArrayPlacementTool] Auto Load Config lỗi: " .. tostring(loadErr))
+if autoLoadConfig and CONFIG.LastArrayFile ~= "" and not CONFIG.LastArrayFile:find("[/\\\\]") then
+    local autoName = CONFIG.LastArrayFile
+    -- Chạy nền: file lớn không chặn lúc khởi động
+    task.spawn(function()
+        local okRead, content = pcall(readfile, ROOT_FOLDER .. "/" .. autoName)
+        if not (okRead and type(content) == "string") then
+            warn("[ArrayPlacementTool] Không đọc được file Array gần nhất: " .. autoName)
+            return
         end
-    else
-        warn("[ArrayPlacementTool] Không đọc được file Array gần nhất: " .. CONFIG.LastArrayFile)
-    end
+        local okParse, loadedItems, loadErr = pcall(parseArrayText, content, function() task.wait() end)
+        if not okParse or not loadedItems then
+            warn("[ArrayPlacementTool] Auto Load Config lỗi: " .. tostring(okParse and loadErr or loadedItems))
+            return
+        end
+        if isRunning or CONFIG.ImportBusy then return end
+        BlockArray = loadedItems
+        selected = BlockArray[1]
+        holding = nil
+        dirty = false
+        panelState.page = 1
+        loadBoxes()
+        refreshAll()
+        setEditorText()
+        notify("Đã tự nạp " .. #loadedItems .. " Block từ " .. autoName, C.green)
+    end)
 end
 loadBoxes()
 refreshAll()
