@@ -36,8 +36,6 @@ local CONFIG = {
     StageGap = 10,          -- khoảng cách giữa các Block đặt tạm (STAGE_GAP)
     StageHeight = 60,       -- độ cao đặt tạm phía trên (STAGE_HEIGHT)
     HideList = false,       -- true: ẩn Danh sách ở cửa sổ Array Placement
-    MaxConcurrent = 40,     -- số lệnh gọi server chạy ĐỒNG THỜI tối đa (đợt lớn hơn sẽ xếp hàng, tránh Block bị bỏ lại ở vị trí tạm)
-    FinishRetries = 3,      -- số lần thử lại Move/Resize nếu Block chưa về đúng vị trí
     AutoLoadResizeGui = false, -- true: tự áp dụng kích thước GUI đã lưu khi khởi động script
     LastArrayFile = "",     -- file Array dùng gần nhất (Auto Load Config sẽ nạp lại file này)
     UISizes = {},           -- kích thước các cửa sổ: { TênCửaSổ = { Rộng, Cao } }
@@ -142,7 +140,6 @@ local function persistConfig(extra)
             StageGap = CONFIG.StageGap,
             StageHeight = CONFIG.StageHeight,
             HideList = CONFIG.HideList == true,
-            MaxConcurrent = CONFIG.MaxConcurrent,
             AutoLoadResizeGui = CONFIG.AutoLoadResizeGui == true,
             LastArrayFile = CONFIG.LastArrayFile or "",
             UISizes = sizes,
@@ -420,7 +417,6 @@ if startupConfig then
     if tonumber(startupConfig.StageHeight) then CONFIG.StageHeight = math.clamp(tonumber(startupConfig.StageHeight), 0, 5000) end
     if type(startupConfig.AutoLoadResizeGui) == "boolean" then CONFIG.AutoLoadResizeGui = startupConfig.AutoLoadResizeGui end
     if type(startupConfig.HideList) == "boolean" then CONFIG.HideList = startupConfig.HideList end
-    if tonumber(startupConfig.MaxConcurrent) then CONFIG.MaxConcurrent = math.clamp(math.floor(tonumber(startupConfig.MaxConcurrent)), 1, 1000) end
     if type(startupConfig.LastArrayFile) == "string" then CONFIG.LastArrayFile = startupConfig.LastArrayFile end
     if type(startupConfig.SelectAnyPart) == "boolean" then CONFIG.SelectAnyPart = startupConfig.SelectAnyPart end
     if type(startupConfig.UISizes) == "table" then
@@ -2180,16 +2176,11 @@ local function placeBlock(blockTemplate, cf)
     local container, cerr = getContainer()
     if not container then return nil, cerr end
 
-    local existing = {}
-    for _, c in ipairs(container:GetChildren()) do
-        existing[c] = true
-    end
-
+    -- ChildAdded chỉ phát cho Instance mới được parent vào container;
+    -- không cần quét GetChildren() để lập bảng existing trước mỗi lần Place.
     local newChildren = {}
     local conn = container.ChildAdded:Connect(function(child)
-        if not existing[child] then
-            newChildren[#newChildren + 1] = child
-        end
+        newChildren[#newChildren + 1] = child
     end)
 
     local ok, ret = pcall(function()
@@ -2361,113 +2352,62 @@ local function setLocked(locked)
     execBtn.BackgroundTransparency = locked and 0.5 or 0
 end
 
--- Chạy fn(job) cho từng job nhưng chỉ cho tối đa `limit` lệnh chạy cùng lúc (các job còn lại xếp hàng).
--- Chờ đến khi xong hết; nếu quá `idleTimeout` giây mà không job nào hoàn thành thì bỏ chờ.
-local function runPool(jobs, limit, fn, idleTimeout)
-    local n = #jobs
-    if n == 0 then return true end
-    limit = math.clamp(math.floor(tonumber(limit) or 1), 1, n)
-    local nextIdx, active = 1, 0
-    local lastProgress = os.clock()
-    for _ = 1, limit do
-        active += 1
-        task.spawn(function()
-            while true do
-                local i = nextIdx
-                if i > n then break end
-                nextIdx = i + 1
-                local okF, errF = pcall(fn, jobs[i])
-                if not okF and jobs[i].Err == nil then jobs[i].Err = tostring(errF) end
-                lastProgress = os.clock()
-            end
-            active -= 1
-        end)
-    end
-    while active > 0 do
-        task.wait(0.05)
-        if os.clock() - lastProgress > (idleTimeout or 10) then return false end
-    end
-    return true
-end
-
--- Block còn ở vị trí đặt tạm (phiêu) thay vì ở đích?  Job đầu tiên đặt ngay tại đích nên luôn hợp lệ.
-local function blockSettled(job)
-    local block = job.Block
-    if not (block and block.Parent) then return false end
-    local cp = job.ColorPart
-    if not (cp and cp.Parent) then
-        cp = findColorPart(block)
-        job.ColorPart = cp
-    end
-    if not cp then return false end
-    if (job.PlaceCF.Position - job.CF.Position).Magnitude < 1 then return true end
-    local dStage = (cp.Position - job.PlaceCF.Position).Magnitude
-    local dTarget = (cp.Position - job.CF.Position).Magnitude
-    return dTarget < dStage
-end
-
--- Đưa Block về đích + đặt kích thước; kiểm tra lại và thử lại nếu Block chưa về đúng chỗ.
-local function finishJob(job)
-    local tries = math.max(1, math.floor(tonumber(CONFIG.FinishRetries) or 1))
-    local lastErr = "Block chưa về đúng vị trí"
-    for attempt = 1, tries do
-        local ok, err = moveBlock(job.Block, job.CF)
-        if ok then
-            ok, err = resizeBlock(job.Block, job.ColorPart, job.CF, job.Resize)
-        end
-        if ok then
-            task.wait(0.1) -- chờ server cập nhật vị trí rồi mới kiểm tra
-            if blockSettled(job) then return true end
-            lastErr = string.format("Block chưa về đúng vị trí (thử %d/%d)", attempt, tries)
-        else
-            lastErr = err
-            if not (job.Block and job.Block.Parent) then break end
-        end
-        task.wait(0.2 * attempt)
-    end
-    return false, lastErr
-end
-
 -- Đặt nhiều Block cùng lúc. Mỗi job nhận lại đúng Block của mình:
 -- ưu tiên Instance server trả về; nếu không có thì ghép với Block mới có ColorPart gần PlaceCF nhất.
 local function placeBatch(batch)
+    local startedAt = os.clock()
     local remote, rerr = getRemote("PlaceBlock")
     local container, cerr = getContainer()
     if not remote or not container then
         for _, job in ipairs(batch) do
             job.Err = rerr or cerr
         end
-        return
+        return os.clock() - startedAt
     end
 
-    local existing = {}
-    for _, c in ipairs(container:GetChildren()) do
-        existing[c] = true
-    end
+    -- ChildAdded chỉ phát cho Block mới; bỏ lượt quét toàn bộ container.
     local newChildren = {}
     local conn = container.ChildAdded:Connect(function(child)
-        if not existing[child] then
-            newChildren[#newChildren + 1] = child
-        end
+        newChildren[#newChildren + 1] = child
     end)
 
-    runPool(batch, CONFIG.MaxConcurrent, function(job)
-        local ok, ret = pcall(function()
-            return remote:InvokeServer(
-                job.Template, job.PlaceCF,
-                getItemBrickColor(job.Item), (job.Item and job.Item.Material) or CONFIG.BlockMaterial
-            )
+    local pending = #batch
+    for _, job in ipairs(batch) do
+        task.spawn(function()
+            local ok, ret = pcall(function()
+                return remote:InvokeServer(
+                    job.Template, job.PlaceCF,
+                    getItemBrickColor(job.Item), (job.Item and job.Item.Material) or CONFIG.BlockMaterial
+                )
+            end)
+            if not ok then
+                job.Err = "PlaceBlock lỗi: " .. tostring(ret)
+            elseif ret == false then
+                job.Err = "Server từ chối PlaceBlock"
+            elseif typeof(ret) == "Instance" and ret.Parent then
+                job.Returned = ret
+            end
+            pending -= 1
         end)
-        if not ok then
-            job.Err = "PlaceBlock lỗi: " .. tostring(ret)
-        elseif ret == false then
-            job.Err = "Server từ chối PlaceBlock"
-        elseif typeof(ret) == "Instance" and ret.Parent then
-            job.Returned = ret
-        end
-    end, CONFIG.PlaceWaitTimeout)
+    end
+
+    local waited = 0
+    while pending > 0 and waited < CONFIG.PlaceWaitTimeout do
+        task.wait(0.05)
+        waited += 0.05
+    end
     task.wait(CONFIG.SettleTime)
     conn:Disconnect()
+
+    local candidates = {}
+    for _, child in ipairs(newChildren) do
+        if child.Parent then
+            local cp = findColorPart(child)
+            if cp then
+                candidates[#candidates + 1] = { Block = child, ColorPart = cp }
+            end
+        end
+    end
 
     local used = {}
     for _, job in ipairs(batch) do
@@ -2475,14 +2415,12 @@ local function placeBatch(batch)
             local block = job.Returned
             if not (block and block.Parent) then
                 local best, bestDist = nil, math.huge
-                for _, child in ipairs(newChildren) do
-                    if child.Parent and not used[child] then
-                        local cp = findColorPart(child)
-                        if cp then
-                            local d = (cp.Position - job.PlaceCF.Position).Magnitude
-                            if d < bestDist then
-                                best, bestDist = child, d
-                            end
+                for _, candidate in ipairs(candidates) do
+                    local child, cp = candidate.Block, candidate.ColorPart
+                    if child.Parent and cp.Parent and not used[child] then
+                        local d = (cp.Position - job.PlaceCF.Position).Magnitude
+                        if d < bestDist then
+                            best, bestDist = child, d
                         end
                     end
                 end
@@ -2493,6 +2431,14 @@ local function placeBatch(batch)
                 used[block] = true
                 job.Block = block
                 job.ColorPart = findColorPart(block)
+                if not job.ColorPart then
+                    for _, candidate in ipairs(candidates) do
+                        if candidate.Block == block then
+                            job.ColorPart = candidate.ColorPart
+                            break
+                        end
+                    end
+                end
                 local w = 0
                 while not job.ColorPart and w < CONFIG.ColorPartTimeout do
                     task.wait(0.1)
@@ -2507,6 +2453,7 @@ local function placeBatch(batch)
             end
         end
     end
+    return os.clock() - startedAt
 end
 
 -- Kiểm tra các thành phần cần cho việc chạy. Trả về chuỗi lỗi nếu thiếu, nil nếu đủ.
@@ -2548,7 +2495,10 @@ execBtn.Activated:Connect(function()
     task.spawn(function()
       local okRun, runErr = pcall(function()
         local total = #BlockArray
-        local batchSize = math.max(1, math.floor(tonumber(CONFIG.BatchSize) or 1))
+        -- CONFIG.BatchSize là giới hạn tối đa do người dùng đặt.
+        -- Bắt đầu ở mức vừa phải rồi tự tăng/giảm theo độ trễ và lỗi thực tế.
+        local batchCeiling = math.clamp(math.floor(tonumber(CONFIG.BatchSize) or 1), 1, 64)
+        local adaptiveBatchSize = math.min(batchCeiling, 8)
         local success, failed = 0, 0
         local errors = {}
 
@@ -2568,16 +2518,19 @@ execBtn.Activated:Connect(function()
         local function pctOf(done, all)
             return all > 0 and math.floor(done / all * 100) or 100
         end
-        for startIdx = 1, total, batchSize do
+        local startIdx = 1
+        while startIdx <= total do
+            local currentBatchSize = math.min(adaptiveBatchSize, total - startIdx + 1)
             local batch = {}
-            for i = startIdx, math.min(startIdx + batchSize - 1, total) do
+            for i = startIdx, startIdx + currentBatchSize - 1 do
                 batch[#batch + 1] = snapshot[i]
                 snapshot[i].Item.Status = "run"
             end
             execBtn.Text = string.format("Đặt %d%% (%d/%d)", pctOf(startIdx - 1, total), startIdx - 1, total)
             refreshList()
 
-            placeBatch(batch)
+            local batchElapsed = placeBatch(batch)
+            local batchHadError = false
 
             for _, job in ipairs(batch) do
                 if job.Err then
@@ -2585,33 +2538,52 @@ execBtn.Activated:Connect(function()
                     job.Item.Status = "fail"
                     errors[#errors + 1] = string.format("#%d: %s", job.Index, tostring(job.Err))
                     warn("[BlockArrayTool] Vị trí " .. job.Index .. " lỗi khi Place: " .. tostring(job.Err))
+                    batchHadError = true
                     if CONFIG.StopOnError then stop = true end
                 else
                     placed[#placed + 1] = job
                 end
             end
-            local doneN = math.min(startIdx + batchSize - 1, total)
+
+            -- Tự điều chỉnh kích thước đợt: tăng khi nhanh/không lỗi, giảm mạnh khi lỗi/chậm.
+            if batchHadError or batchElapsed >= CONFIG.PlaceWaitTimeout * 0.85 then
+                adaptiveBatchSize = math.max(1, math.floor(adaptiveBatchSize / 2))
+            elseif batchElapsed <= CONFIG.PlaceWaitTimeout * 0.35 then
+                adaptiveBatchSize = math.min(batchCeiling, adaptiveBatchSize + math.max(1, math.floor(adaptiveBatchSize * 0.25)))
+            end
+
+            local doneN = math.min(startIdx + currentBatchSize - 1, total)
             execBtn.Text = string.format("Đặt %d%% (%d/%d)", pctOf(doneN, total), doneN, total)
             refreshList()
+            startIdx = doneN + 1
             if stop then break end
-            task.wait(CONFIG.StepDelay)
+            -- Giữ nhịp nghỉ rất ngắn để nhường scheduler, không dùng delay dài cố định.
+            if CONFIG.StepDelay > 0 then task.wait(math.min(CONFIG.StepDelay, 0.03)) end
         end
 
         -- Bước 2: đưa Block về đích và đặt kích thước, theo đợt (các Block trong đợt chạy song song).
-        for startIdx = 1, #placed, batchSize do
+        local finishIdx = 1
+        while finishIdx <= #placed do
+            local currentBatchSize = math.min(adaptiveBatchSize, #placed - finishIdx + 1)
             local batch = {}
-            for i = startIdx, math.min(startIdx + batchSize - 1, #placed) do
+            for i = finishIdx, finishIdx + currentBatchSize - 1 do
                 batch[#batch + 1] = placed[i]
             end
-            execBtn.Text = string.format("Hoàn tất %d%% (%d/%d)", pctOf(startIdx - 1, #placed), startIdx - 1, #placed)
+            execBtn.Text = string.format("Hoàn tất %d%% (%d/%d)", pctOf(finishIdx - 1, #placed), finishIdx - 1, #placed)
 
-            runPool(batch, CONFIG.MaxConcurrent, function(job)
-                job.StepOk, job.StepErr = finishJob(job)
-            end, 20)
+            local pending = #batch
             for _, job in ipairs(batch) do
-                if job.StepOk == nil then
-                    job.StepOk, job.StepErr = false, "Quá thời gian chờ khi đưa Block về đích"
-                end
+                task.spawn(function()
+                    local stepOk, stepErr = moveBlock(job.Block, job.CF)
+                    if stepOk then
+                        stepOk, stepErr = resizeBlock(job.Block, job.ColorPart, job.CF, job.Resize)
+                    end
+                    job.StepOk, job.StepErr = stepOk, stepErr
+                    pending -= 1
+                end)
+            end
+            while pending > 0 do
+                task.wait(0.05)
             end
 
             for _, job in ipairs(batch) do
@@ -2625,30 +2597,11 @@ execBtn.Activated:Connect(function()
                     warn("[BlockArrayTool] Vị trí " .. job.Index .. " lỗi khi hoàn tất: " .. tostring(job.StepErr))
                 end
             end
-            local doneF = math.min(startIdx + batchSize - 1, #placed)
+            local doneF = math.min(finishIdx + currentBatchSize - 1, #placed)
             execBtn.Text = string.format("Hoàn tất %d%% (%d/%d)", pctOf(doneF, #placed), doneF, #placed)
             refreshList()
-            task.wait(CONFIG.StepDelay)
-        end
-
-        -- Quét cuối: Block nào vẫn còn ở vị trí tạm (phiêu) thì Move/Resize lại
-        local stuck = {}
-        for _, job in ipairs(placed) do
-            if job.StepOk and not blockSettled(job) then stuck[#stuck + 1] = job end
-        end
-        if #stuck > 0 then
-            execBtn.Text = string.format("Sửa %d Block phiêu...", #stuck)
-            runPool(stuck, CONFIG.MaxConcurrent, function(job)
-                job.StepOk, job.StepErr = finishJob(job)
-            end, 20)
-            for _, job in ipairs(stuck) do
-                if not job.StepOk then
-                    success = success - 1
-                    failed = failed + 1
-                    job.Item.Status = "fail"
-                    errors[#errors + 1] = string.format("#%d: %s", job.Index, tostring(job.StepErr))
-                end
-            end
+            finishIdx = doneF + 1
+            if CONFIG.StepDelay > 0 then task.wait(math.min(CONFIG.StepDelay, 0.03)) end
         end
 
         setLocked(false)
@@ -3836,7 +3789,6 @@ do -- Cài đặt mới: STAGE_GAP, STAGE_HEIGHT, tự load Resize GUI
     end
     numberSetting(10, "Khoảng cách Block tạm - STAGE_GAP (0 - 1000)", "StageGap", 0, 1000, "Đã đổi STAGE_GAP: ")
     numberSetting(12, "Độ cao Block tạm - STAGE_HEIGHT (0 - 5000)", "StageHeight", 0, 5000, "Đã đổi STAGE_HEIGHT: ")
-    numberSetting(16, "Giới hạn gọi server cùng lúc (1 - 1000)", "MaxConcurrent", 1, 1000, "Đã đổi giới hạn đồng thời: ")
 
     local anyPartToggle = mk("TextButton", {
         LayoutOrder = 14, Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = C.peri, TextColor3 = C.ink,
